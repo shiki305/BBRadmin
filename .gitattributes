@@ -1,0 +1,15 @@
+# Line endings: the Windows scripts and the C# sources are CRLF, the documentation is LF,
+# and everything binary (the co-op server's DLLs, an exe, a zip) is left exactly as it is.
+*.cmd text eol=crlf
+*.cs text eol=crlf
+*.manifest text eol=crlf
+*.ini text eol=crlf
+*.cfg text eol=crlf
+*.md text eol=lf
+*.txt text eol=lf
+
+*.exe binary
+*.dll binary
+*.zip binary
+*.png binary
+*.ico binary
