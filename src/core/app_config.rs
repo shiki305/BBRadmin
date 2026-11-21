@@ -19,6 +19,57 @@ use crate::core::log;
 pub const ROLE_HOST: &str = "host";
 pub const ROLE_GUEST: &str = "guest";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub const ALL: &[ThemeMode] = &[ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
+
+    pub fn from_config(val: &str) -> Self {
+        match val.trim().to_ascii_lowercase().as_str() {
+            "dark" => Self::Dark,
+            "light" => Self::Light,
+            _ => Self::System,
+        }
+    }
+
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Seguir o tema do Windows (padrão)",
+            Self::Dark => "Escuro",
+            Self::Light => "Claro",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::System => "Tema: Sistema",
+            Self::Dark => "Tema: Escuro",
+            Self::Light => "Tema: Claro",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::System => Self::Dark,
+            Self::Dark => Self::Light,
+            Self::Light => Self::System,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bbport_dir: String,
@@ -29,6 +80,7 @@ pub struct AppConfig {
     pub rules: HostRules,
     pub play_with: String,
     pub display_mode: DisplayMode,
+    pub theme: ThemeMode,
     pub keep_server: bool,
     pub stop_server_with_game: bool,
 }
@@ -44,6 +96,7 @@ impl Default for AppConfig {
             rules: HostRules::default(),
             play_with: String::new(),
             display_mode: DisplayMode::FollowLauncher,
+            theme: ThemeMode::System,
             keep_server: false,
             stop_server_with_game: true,
         }
@@ -113,6 +166,7 @@ impl AppConfig {
                             };
                     }
                     "display_mode" => config.display_mode = DisplayMode::from_config(value),
+                    "theme" => config.theme = ThemeMode::from_config(value),
                     "keep_server" => config.keep_server = value == "1",
                     "stop_server_with_game" => config.stop_server_with_game = value != "0",
                     _ => {}
@@ -186,6 +240,7 @@ impl AppConfig {
             format!("rule_custom_poise={}", self.rules.custom_poise),
             format!("play_with={}", self.play_with),
             format!("display_mode={}", self.display_mode.as_config()),
+            format!("theme={}", self.theme.as_config()),
             format!("keep_server={}", if self.keep_server { "1" } else { "0" }),
             format!(
                 "stop_server_with_game={}",

@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
-use crate::core::app_config::{self, AppConfig};
+use crate::core::app_config::{self, AppConfig, ThemeMode};
 use crate::core::bbport::{self, BbportInfo};
 use crate::core::bbport_launcher;
 use crate::core::coop_schema;
@@ -80,7 +80,57 @@ struct ServerSnapshot {
     state: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    window_bg: egui::Color32,
+    header_bg: egui::Color32,
+    card_bg: egui::Color32,
+    bar_bg: egui::Color32,
+    log_bg: egui::Color32,
+    border: egui::Color32,
+    title_text: egui::Color32,
+    section_text: egui::Color32,
+    muted_text: egui::Color32,
+    play_btn_bg: egui::Color32,
+    play_btn_text: egui::Color32,
+}
+
+impl Palette {
+    fn of(dark: bool) -> Self {
+        if dark {
+            Self {
+                window_bg: egui::Color32::from_rgb(20, 21, 25),
+                header_bg: egui::Color32::from_rgb(27, 29, 35),
+                card_bg: egui::Color32::from_rgb(29, 31, 38),
+                bar_bg: egui::Color32::from_rgb(24, 26, 31),
+                log_bg: egui::Color32::from_rgb(15, 16, 20),
+                border: egui::Color32::from_rgb(52, 56, 66),
+                title_text: egui::Color32::from_rgb(240, 242, 247),
+                section_text: egui::Color32::from_rgb(225, 228, 236),
+                muted_text: egui::Color32::from_rgb(158, 165, 180),
+                play_btn_bg: egui::Color32::from_rgb(138, 32, 44),
+                play_btn_text: egui::Color32::from_rgb(252, 248, 248),
+            }
+        } else {
+            Self {
+                window_bg: egui::Color32::from_rgb(243, 243, 243),
+                header_bg: egui::Color32::WHITE,
+                card_bg: egui::Color32::from_rgb(249, 249, 249),
+                bar_bg: egui::Color32::from_rgb(236, 236, 236),
+                log_bg: egui::Color32::from_rgb(250, 250, 250),
+                border: egui::Color32::from_rgb(215, 215, 215),
+                title_text: egui::Color32::from_rgb(24, 24, 24),
+                section_text: egui::Color32::from_rgb(35, 35, 35),
+                muted_text: egui::Color32::from_rgb(95, 95, 95),
+                play_btn_bg: egui::Color32::from_rgb(148, 36, 48),
+                play_btn_text: egui::Color32::WHITE,
+            }
+        }
+    }
+}
+
 pub fn run(config: AppConfig) -> eframe::Result<()> {
+    let initial_theme = config.theme;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("BBRadmin · co-op em Radmin VPN")
@@ -93,18 +143,50 @@ pub fn run(config: AppConfig) -> eframe::Result<()> {
         "BBRadmin",
         options,
         Box::new(move |cc| {
-            configure_visuals(&cc.egui_ctx);
+            install_themes(&cc.egui_ctx);
+            apply_theme(&cc.egui_ctx, initial_theme);
             Ok(Box::new(BbradminApp::new(config, cc.egui_ctx.clone())))
         }),
     )
 }
 
-fn configure_visuals(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::light();
-    visuals.window_fill = egui::Color32::from_rgb(243, 243, 243);
-    visuals.panel_fill = egui::Color32::from_rgb(243, 243, 243);
-    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(248, 248, 248);
-    ctx.set_visuals(visuals);
+fn build_visuals(dark: bool) -> egui::Visuals {
+    let p = Palette::of(dark);
+    let mut visuals = if dark {
+        let mut v = egui::Visuals::dark();
+        v.extreme_bg_color = egui::Color32::from_rgb(15, 16, 20);
+        v.faint_bg_color = egui::Color32::from_rgb(36, 39, 48);
+        v.widgets.noninteractive.bg_fill = p.card_bg;
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, p.border);
+        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(42, 45, 55);
+        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(56, 60, 74);
+        v.widgets.active.bg_fill = egui::Color32::from_rgb(70, 75, 92);
+        v.selection.bg_fill = egui::Color32::from_rgb(138, 32, 44);
+        v.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(210, 90, 102));
+        v
+    } else {
+        let mut v = egui::Visuals::light();
+        v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(248, 248, 248);
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, p.border);
+        v
+    };
+    visuals.window_fill = p.window_bg;
+    visuals.panel_fill = p.window_bg;
+    visuals
+}
+
+fn install_themes(ctx: &egui::Context) {
+    ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
+    ctx.set_visuals_of(egui::Theme::Light, build_visuals(false));
+}
+
+fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
+    let pref = match mode {
+        ThemeMode::System => egui::ThemePreference::System,
+        ThemeMode::Dark => egui::ThemePreference::Dark,
+        ThemeMode::Light => egui::ThemePreference::Light,
+    };
+    ctx.set_theme(pref);
 }
 
 struct BbradminApp {
@@ -464,11 +546,14 @@ impl eframe::App for BbradminApp {
                 state: "parado",
             });
 
+        let p = Palette::of(ctx.style().visuals.dark_mode);
+
         // ---- Header ----
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::NONE
-                    .fill(egui::Color32::WHITE)
+                    .fill(p.header_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, p.border))
                     .inner_margin(egui::Margin::symmetric(14, 10)),
             )
             .show(ctx, |ui| {
@@ -478,19 +563,19 @@ impl eframe::App for BbradminApp {
                             egui::RichText::new("BBRadmin")
                                 .size(19.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(24, 24, 24)),
+                                .color(p.title_text),
                         );
                         ui.label(
                             egui::RichText::new("co-op contínuo para Bloodborne, por Radmin VPN")
                                 .size(12.0)
-                                .color(egui::Color32::from_rgb(105, 105, 105)),
+                                .color(p.muted_text),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(self.port.describe())
                                 .size(11.5)
-                                .color(egui::Color32::from_rgb(105, 105, 105)),
+                                .color(p.muted_text),
                         );
                     });
                 });
@@ -504,11 +589,8 @@ impl eframe::App for BbradminApp {
                 .min_height(100.0)
                 .frame(
                     egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(250, 250, 250))
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            egui::Color32::from_rgb(215, 215, 215),
-                        ))
+                        .fill(p.log_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, p.border))
                         .inner_margin(egui::Margin::same(8)),
                 )
                 .show(ctx, |ui| {
@@ -531,11 +613,8 @@ impl eframe::App for BbradminApp {
         egui::TopBottomPanel::bottom("bottom_bar")
             .frame(
                 egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(236, 236, 236))
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        egui::Color32::from_rgb(215, 215, 215),
-                    ))
+                    .fill(p.bar_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, p.border))
                     .inner_margin(egui::Margin::symmetric(14, 7)),
             )
             .show(ctx, |ui| {
@@ -571,6 +650,12 @@ impl eframe::App for BbradminApp {
                                 self.append_log(&combined);
                             }
                         }
+
+                        if ui.button(self.config.theme.short_label()).clicked() {
+                            self.config.theme = self.config.theme.next();
+                            apply_theme(ctx, self.config.theme);
+                            self.config.save();
+                        }
                     });
                 });
             });
@@ -579,7 +664,7 @@ impl eframe::App for BbradminApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(243, 243, 243))
+                    .fill(p.window_bg)
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
@@ -677,9 +762,14 @@ impl BbradminApp {
         ui.add_space(6.0);
         group_box(ui, "Começar", |ui| {
             ui.horizontal(|ui| {
+                let p = Palette::of(ui.visuals().dark_mode);
                 let play_btn = egui::Button::new(
-                    egui::RichText::new("Jogar co-op").size(16.0).strong(),
+                    egui::RichText::new("Jogar co-op")
+                        .size(16.0)
+                        .strong()
+                        .color(p.play_btn_text),
                 )
+                .fill(p.play_btn_bg)
                 .min_size(egui::vec2(210.0, 52.0));
                 if ui
                     .add_enabled(!self.busy && self.port.ready(), play_btn)
@@ -719,7 +809,7 @@ impl BbradminApp {
                 ui.label(
                     egui::RichText::new(hint)
                         .size(11.5)
-                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                        .color(p.muted_text),
                 );
             });
         });
@@ -738,6 +828,7 @@ impl BbradminApp {
     }
 
     fn render_coop_tab(&mut self, ui: &mut egui::Ui) {
+        let p = Palette::of(ui.visuals().dark_mode);
         ui.label(
             egui::RichText::new(
                 "As regras do líder do time: valem para o time inteiro e aparecem na tela do time \
@@ -745,7 +836,7 @@ impl BbradminApp {
                  do próximo start (marque antes de \"Jogar co-op\").",
             )
             .size(12.0)
-            .color(egui::Color32::from_rgb(95, 95, 95)),
+            .color(p.muted_text),
         );
         ui.add_space(6.0);
 
@@ -892,7 +983,7 @@ impl BbradminApp {
                     self.config.rules.describe()
                 ))
                 .size(12.0)
-                .color(egui::Color32::from_rgb(95, 95, 95)),
+                .color(p.muted_text),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Pegar do bbport").clicked() {
@@ -914,13 +1005,14 @@ impl BbradminApp {
     }
 
     fn render_controls_tab(&mut self, ui: &mut egui::Ui) {
+        let p = Palette::of(ui.visuals().dark_mode);
         ui.label(
             egui::RichText::new(
                 "O jogo aceita teclado/mouse e controle ao mesmo tempo: as teclas e os botões do \
                  controle respondem sempre. A escolha abaixo decide só o mouse.",
             )
             .size(12.0)
-            .color(egui::Color32::from_rgb(95, 95, 95)),
+            .color(p.muted_text),
         );
         ui.add_space(6.0);
 
@@ -957,13 +1049,13 @@ impl BbradminApp {
                      As teclas continuam valendo nas duas opções.",
                 )
                 .size(11.5)
-                .color(egui::Color32::from_rgb(100, 100, 100)),
+                .color(p.muted_text),
             );
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(&self.input_hint)
                     .size(11.5)
-                    .color(egui::Color32::from_rgb(90, 90, 90)),
+                    .color(p.muted_text),
             );
         });
 
@@ -1025,6 +1117,7 @@ impl BbradminApp {
     }
 
     fn render_advanced_tab(&mut self, ui: &mut egui::Ui) {
+        let p = Palette::of(ui.visuals().dark_mode);
         group_box(ui, "Pasta do bbport", |ui| {
             ui.label("A que tem o Bloodborne.exe:");
             ui.horizontal(|ui| {
@@ -1063,7 +1156,7 @@ impl BbradminApp {
             ui.label(
                 egui::RichText::new(info_text)
                     .size(11.5)
-                    .color(egui::Color32::from_rgb(95, 95, 95)),
+                    .color(p.muted_text),
             );
         });
 
@@ -1087,7 +1180,7 @@ impl BbradminApp {
             ui.label(
                 egui::RichText::new(&self.launcher_display_hint)
                     .size(11.5)
-                    .color(egui::Color32::from_rgb(95, 95, 95)),
+                    .color(p.muted_text),
             );
         });
 
@@ -1141,12 +1234,32 @@ impl BbradminApp {
             ui.label(
                 egui::RichText::new(&self.launcher_account_hint)
                     .size(11.5)
-                    .color(egui::Color32::from_rgb(95, 95, 95)),
+                    .color(p.muted_text),
             );
         });
 
         ui.add_space(6.0);
         group_box(ui, "Opções", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Tema:");
+                let current_theme = self.config.theme;
+                egui::ComboBox::from_id_salt("theme_combo")
+                    .width(260.0)
+                    .selected_text(current_theme.label())
+                    .show_ui(ui, |ui| {
+                        for &mode in ThemeMode::ALL {
+                            if ui
+                                .selectable_label(mode == current_theme, mode.label())
+                                .clicked()
+                            {
+                                self.config.theme = mode;
+                                apply_theme(ui.ctx(), mode);
+                                self.config.save();
+                            }
+                        }
+                    });
+            });
+            ui.add_space(2.0);
             if ui
                 .checkbox(
                     &mut self.config.keep_server,
@@ -1233,9 +1346,11 @@ impl BbradminApp {
 }
 
 fn group_box(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let p = Palette::of(ui.visuals().dark_mode);
     egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(249, 249, 249))
-        .corner_radius(4.0)
+        .fill(p.card_bg)
+        .stroke(egui::Stroke::new(1.0_f32, p.border))
+        .corner_radius(5.0)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1243,7 +1358,7 @@ fn group_box(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui
                 egui::RichText::new(title)
                     .strong()
                     .size(12.5)
-                    .color(egui::Color32::from_rgb(35, 35, 35)),
+                    .color(p.section_text),
             );
             ui.add_space(3.0);
             add_contents(ui);
@@ -1251,13 +1366,10 @@ fn group_box(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui
 }
 
 fn note_label(ui: &mut egui::Ui, text: &str) {
+    let p = Palette::of(ui.visuals().dark_mode);
     ui.horizontal(|ui| {
         ui.add_space(20.0);
-        ui.label(
-            egui::RichText::new(text)
-                .size(11.5)
-                .color(egui::Color32::from_rgb(105, 105, 105)),
-        );
+        ui.label(egui::RichText::new(text).size(11.5).color(p.muted_text));
     });
 }
 

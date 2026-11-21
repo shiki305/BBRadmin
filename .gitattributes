@@ -1,10 +1,11 @@
-# Line endings: the Windows scripts and the C# sources are CRLF, the documentation is LF,
-# and everything binary (the co-op server's DLLs, an exe, a zip) is left exactly as it is.
+# Line endings: Windows scripts/manifests are CRLF, Rust sources and docs are LF,
+# and binaries (the embedded co-op server DLLs/exe) stay untouched.
 *.cmd text eol=crlf
-*.cs text eol=crlf
 *.manifest text eol=crlf
 *.ini text eol=crlf
 *.cfg text eol=crlf
+*.rs text eol=lf
+*.toml text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 
@@ -13,3 +14,7 @@
 *.zip binary
 *.png binary
 *.ico binary
+
+# GitHub Linguist hints
+Cargo.lock linguist-generated=true
+vendor/** linguist-vendored
