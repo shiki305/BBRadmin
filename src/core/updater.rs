@@ -1,4 +1,4 @@
-//! Automatic self-updater via GitHub Releases (`anreren/BBRadmin`).
+//! Automatic self-updater via GitHub Releases (`shiki305/BBRadmin`).
 //!
 //! On Windows, a running executable cannot be overwritten in-place, but it CAN be renamed
 //! (`BBRadmin.exe` -> `BBRadmin.exe.old`) while running. We download the new binary to
@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::core::log;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_LATEST_API: &str = "https://api.github.com/repos/anreren/BBRadmin/releases/latest";
+const RELEASES_LATEST_API: &str = "https://api.github.com/repos/shiki305/BBRadmin/releases/latest";
 const ASSET_NAME: &str = "BBRadmin.exe";
 const MIN_BINARY_BYTES: u64 = 1_000_000; // sanity guard against error pages
 
@@ -84,7 +84,7 @@ pub fn check_latest() -> Result<Option<UpdateInfo>, String> {
     let html_url = json
         .get("html_url")
         .and_then(|v| v.as_str())
-        .unwrap_or("https://github.com/anreren/BBRadmin/releases/latest")
+        .unwrap_or("https://github.com/shiki305/BBRadmin/releases/latest")
         .to_string();
 
     let assets = json

@@ -1,9 +1,12 @@
-# BBRadmin (Rust)
+# BBRadmin
 
-Fork em **Rust** de [shiki305/BBRadmin](https://github.com/shiki305/BBRadmin): co-op seamless do
-Bloodborne (port **bbport** para Windows) entre dois ou mais jogadores na **mesma rede Radmin VPN**,
-com o **servidor de co-op rodando no PC de um dos jogadores**.
-Uma janela, um executável nativo, nada para instalar.
+Co-op seamless do Bloodborne (port **bbport** para Windows) entre dois ou mais jogadores na
+**mesma rede Radmin VPN**, com o **servidor de co-op rodando no PC de um dos jogadores**.
+Uma janela, um executável nativo em **Rust**, nada para instalar.
+
+**Baixar:** pegue o `BBRadmin.exe` na página de releases
+(<https://github.com/shiki305/BBRadmin/releases>) — é um arquivo só, não precisa instalar nada.
+Para compilar do zero, veja [Compilar](#compilar).
 
 O jogo é iniciado pelo **próprio motor do bbport** (`bin\bb-probe-seamless.exe`), com o co-op
 da **BBSC: Yharnam Together 1.0.0** — a mesma release de que o bbport 1.9.8.6 é feito. É co-op
@@ -44,7 +47,7 @@ Nesta versão em **Rust**:
 - **Tema escuro / claro automático:** segue o tema do Windows por padrão (com alternância rápida
   entre **Sistema / Escuro / Claro** na barra inferior ou em **Avançado → Opções**).
 - **Atualização automática ao abrir:** verifica em segundo plano a release mais recente no GitHub
-  (`anreren/BBRadmin`), baixa e valida o novo `BBRadmin.exe` e reinicia automaticamente quando
+  (`shiki305/BBRadmin`), baixa e valida o novo `BBRadmin.exe` e reinicia automaticamente quando
   possível (também disponível manualmente em **Avançado → Verificar atualizações**).
 
 ---
@@ -113,6 +116,5 @@ O **BBRadmin é software livre sob a GPL-2.0** (veja `LICENSE`), porque carrega 
 do próprio exe, o **shadNet** da *BBSC: Yharnam Together 1.0.0*
 (`version=1.0.0;revision=cdb58df0bbb0;protocol=9`), **GPL-2.0**, da equipe:
 
-- Projeto original BBRadmin: <https://github.com/shiki305/BBRadmin>
 - CLS_AMG — <https://github.com/CLSAMG22> (release: `BBSC-Yharnam-Together-1.0.0-BBport.zip`)
 - Yharnam Together (Kaniel) — <https://github.com/lKaniel/bloodborne-server> (fonte do servidor)
