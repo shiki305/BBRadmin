@@ -1,4 +1,4 @@
 build/
-*.user
-*.suo
-*.log
+target/
+*.exe
+!vendor/**/*.exe

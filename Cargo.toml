@@ -1,0 +1,51 @@
+[package]
+name = "bbradmin"
+version = "2.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Co-op seamless do Bloodborne (bbport) em Radmin VPN — reescrito em Rust"
+
+[[bin]]
+name = "BBRadmin"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = "0.4"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+rand = "0.8"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
