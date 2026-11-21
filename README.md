@@ -40,12 +40,11 @@ Nesta versão em **Rust**:
   e encaminhadas no ambiente do jogo (`src/core/bbport_launcher.rs` e `src/core/game_environment.rs`).
 - Um `WindowPlacer` Win32 nativo (`src/core/display.rs`) roda em background enquanto o jogo está
   aberto, monitorando `bb-probe-seamless.exe` e `bb-probe.exe` para aplicar **borderless fullscreen**,
-  posicionamento em múltiplos monitores e tamanho de janela.
-- Na aba **Avançado → Modo de tela**, é possível seguir automaticamente o launcher do bbport
-  (padrão) ou sobrescrever diretamente pelo BBRadmin (*Tela cheia sem bordas*, *Tela cheia SDL*,
-  *Tela cheia exclusiva* ou *Janela*).
+  posicionamento em múltiplos monitores e tamanho de janela conforme configurado no launcher do `bbport`.
 - **Tema escuro / claro automático:** segue o tema do Windows por padrão (com alternância rápida
-  entre **Sistema / Escuro / Claro** na barra inferior ou em **Avançado → Opções**).
+  entre **Sistema / Escuro / Claro** na barra inferior).
+- **Português (BR) e English (US):** segue automaticamente o idioma do Windows por padrão, com
+  troca rápida em **Avançado → Opções → Idioma**.
 - **Atualização automática ao abrir:** verifica em segundo plano a release mais recente no GitHub
   (`shiki305/BBRadmin`), baixa e valida o novo `BBRadmin.exe` e reinicia automaticamente quando
   possível (também disponível manualmente em **Avançado → Verificar atualizações**).

@@ -1,13 +1,16 @@
-//! BBRadmin graphical interface (eframe / egui), preserving all four tabs (Jogar, Co-op,
-//! Controles, Avançado), collapsible log panel, background workers, UAC firewall helper, and
-//! automatic WindowPlacer management for fullscreen / borderless fullscreen.
+//! BBRadmin graphical interface (eframe / egui), with:
+//! - Four tabs (Jogar/Play, Co-op, Controles/Controls, Avançado/Advanced)
+//! - Windows-synced Dark/Light theme (quick toggle in bottom bar)
+//! - Full Português (BR) and English (US) localization (auto-detects Windows UI language)
+//! - Visual server connection test badge (green checkmark / red X circle)
+//! - Background server poller, WindowPlacer for fullscreen/borderless, and GitHub Releases auto-updater
 
 use std::ffi::OsStr;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -22,27 +25,28 @@ use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
-use crate::core::app_config::{self, AppConfig, ThemeMode};
+use crate::core::app_config::{self, AppConfig};
 use crate::core::bbport::{self, BbportInfo};
 use crate::core::bbport_launcher;
 use crate::core::coop_schema;
-use crate::core::display::{self, DisplayMode, ResolvedDisplay, WindowPlacer};
+use crate::core::display::{ResolvedDisplay, WindowPlacer};
 use crate::core::dry_run;
 use crate::core::firewall;
 use crate::core::game_environment;
 use crate::core::health;
 use crate::core::host_rules::HostRules;
+use crate::core::i18n::{t, Lang, LangMode};
 use crate::core::input_config;
 use crate::core::log;
 use crate::core::overrides;
 use crate::core::radmin::{self, NetworkChoice};
-use crate::core::server_controller::ServerController;
+use crate::core::server_controller::{ServerController, ServerState};
 use crate::core::updater;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const ENEMIES_VALUES: &[&str] = &["off", "auto", "bit", "on", "much", "custom"];
-const ENEMIES_LABELS: &[&str] = &[
+const ENEMIES_LABELS_PT: &[&str] = &[
     "Normal — como o jogo: vida ×1 · dano ×1 · equilíbrio ×1   (padrão)",
     "Automático — sobe com cada caçador no mesmo mapa (até \"Mais fortes\" com o time cheio)",
     "Um pouco mais fortes — vida ×1,5 · dano ×1,25 · equilíbrio ×1,5",
@@ -50,12 +54,25 @@ const ENEMIES_LABELS: &[&str] = &[
     "Muito mais fortes — vida ×5 · dano ×2 · equilíbrio ×5",
     "Personalizado — os meus números (1 a 10; 1 = o do jogo):",
 ];
+const ENEMIES_LABELS_EN: &[&str] = &[
+    "Normal — vanilla game: HP ×1 · damage ×1 · poise ×1   (default)",
+    "Automatic — scales with each hunter on the same map (up to \"Stronger\" with a full party)",
+    "A bit stronger — HP ×1.5 · damage ×1.25 · poise ×1.5",
+    "Stronger — HP ×3 · damage ×1.5 · poise ×3",
+    "Much stronger — HP ×5 · damage ×2 · poise ×5",
+    "Custom — your own multipliers (1 to 10; 1 = vanilla):",
+];
 
 const TEMPO_VALUES: &[&str] = &["", "aggressive", "relentless"];
-const TEMPO_LABELS: &[&str] = &[
+const TEMPO_LABELS_PT: &[&str] = &[
     "Normal — como o jogo (padrão)",
     "Agressivo — metade das pausas, giros ×1,3",
     "Implacável — um quarto das pausas, giros ×1,6",
+];
+const TEMPO_LABELS_EN: &[&str] = &[
+    "Normal — vanilla game (default)",
+    "Aggressive — half the pauses, turn speed ×1.3",
+    "Relentless — quarter the pauses, turn speed ×1.6",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,25 +83,36 @@ enum Tab {
     Advanced,
 }
 
+#[derive(Debug, Clone)]
+enum TestResult {
+    Testing,
+    Ok(String),
+    Fail(String),
+}
+
 enum WorkerMsg {
     Done(String),
     GameStarted {
         child: Child,
         display: ResolvedDisplay,
     },
+    TestFinished {
+        ok: bool,
+        detail: String,
+    },
     RefreshInputHint,
     UpdateStatus(Option<String>),
     UpdateLog(String),
     UpdateReadyToRestart {
-        exe: std::path::PathBuf,
+        exe: PathBuf,
         version: String,
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ServerSnapshot {
     running: bool,
-    state: &'static str,
+    state: ServerState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,11 +166,17 @@ impl Palette {
 
 pub fn run(config: AppConfig) -> eframe::Result<()> {
     let initial_theme = config.theme;
+    let initial_lang = config.lang.resolve();
+    let title = t(
+        initial_lang,
+        "BBRadmin · co-op em Radmin VPN",
+        "BBRadmin · Radmin VPN co-op",
+    );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("BBRadmin · co-op em Radmin VPN")
-            .with_inner_size([660.0, 700.0])
-            .with_min_inner_size([610.0, 520.0]),
+            .with_title(title)
+            .with_inner_size([690.0, 690.0])
+            .with_min_inner_size([640.0, 520.0]),
         ..Default::default()
     };
 
@@ -187,11 +221,11 @@ fn install_themes(ctx: &egui::Context) {
     ctx.set_visuals_of(egui::Theme::Light, build_visuals(false));
 }
 
-fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
+fn apply_theme(ctx: &egui::Context, mode: app_config::ThemeMode) {
     let pref = match mode {
-        ThemeMode::System => egui::ThemePreference::System,
-        ThemeMode::Dark => egui::ThemePreference::Dark,
-        ThemeMode::Light => egui::ThemePreference::Light,
+        app_config::ThemeMode::System => egui::ThemePreference::System,
+        app_config::ThemeMode::Dark => egui::ThemePreference::Dark,
+        app_config::ThemeMode::Light => egui::ThemePreference::Light,
     };
     ctx.set_theme(pref);
 }
@@ -219,9 +253,8 @@ struct BbradminApp {
     auto_firewall: bool,
     show_log: bool,
     log_lines: Vec<String>,
-    launcher_account_hint: String,
-    launcher_display_hint: String,
-    input_hint: String,
+    launcher_settings: bbport_launcher::LauncherSettings,
+    test_result: Option<TestResult>,
     update_status: Option<String>,
     restarting_for_update: bool,
 }
@@ -232,7 +265,7 @@ impl BbradminApp {
         let server = Arc::new(ServerController::new());
         let server_snapshot = Arc::new(Mutex::new(ServerSnapshot {
             running: false,
-            state: "parado",
+            state: ServerState::Stopped,
         }));
         let poller_stop = Arc::new(AtomicBool::new(false));
 
@@ -245,7 +278,7 @@ impl BbradminApp {
             thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let running = srv.running();
-                    let state = srv.state();
+                    let state = srv.state_code();
                     if let Ok(mut guard) = snap.lock() {
                         guard.running = running;
                         guard.state = state;
@@ -280,105 +313,165 @@ impl BbradminApp {
             auto_firewall: true,
             show_log: false,
             log_lines: Vec::new(),
-            launcher_account_hint: String::new(),
-            launcher_display_hint: String::new(),
-            input_hint: String::new(),
+            launcher_settings: bbport_launcher::LauncherSettings::default(),
+            test_result: None,
             update_status: None,
             restarting_for_update: false,
         };
         app.refresh_detection();
-        log::line(&format!("BBRadmin v{} (Rust) aberto.", updater::CURRENT_VERSION));
+        log::line(&format!(
+            "BBRadmin v{} (Rust) aberto.",
+            updater::CURRENT_VERSION
+        ));
         if app.config.auto_update {
             app.start_auto_update_check();
         }
         app
     }
 
+    fn lang(&self) -> Lang {
+        self.config.lang.resolve()
+    }
+
     fn start_auto_update_check(&self) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
-        thread::spawn(move || {
-            match updater::check_latest() {
-                Ok(Some(info)) => {
-                    let msg = format!("Nova versão v{} encontrada; atualizando...", info.version);
-                    log::line(&msg);
-                    let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
-                        "Atualizando para v{}...",
-                        info.version
-                    ))));
-                    let _ = tx.send(WorkerMsg::UpdateLog(msg));
-                    ctx.request_repaint();
+        let lang = self.lang();
+        thread::spawn(move || match updater::check_latest() {
+            Ok(Some(info)) => {
+                let msg = format!(
+                    "{} v{}...",
+                    t(
+                        lang,
+                        "Nova versão encontrada; atualizando para",
+                        "New version found; updating to"
+                    ),
+                    info.version
+                );
+                log::line(&msg);
+                let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
+                    "{} v{}...",
+                    t(lang, "Atualizando para", "Updating to"),
+                    info.version
+                ))));
+                let _ = tx.send(WorkerMsg::UpdateLog(msg));
+                ctx.request_repaint();
 
-                    match updater::download_and_apply(&info) {
-                        Ok(exe) => {
-                            let _ = tx.send(WorkerMsg::UpdateReadyToRestart {
-                                exe,
-                                version: info.version,
-                            });
-                        }
-                        Err(err) => {
-                            log::line(&format!("Atualização automática falhou: {err}"));
-                            let _ = tx.send(WorkerMsg::UpdateStatus(None));
-                            let _ = tx.send(WorkerMsg::UpdateLog(format!(
-                                "Não foi possível atualizar automaticamente para v{}: {err} ({})",
-                                info.version, info.html_url
-                            )));
-                        }
+                match updater::download_and_apply(&info) {
+                    Ok(exe) => {
+                        let _ = tx.send(WorkerMsg::UpdateReadyToRestart {
+                            exe,
+                            version: info.version,
+                        });
                     }
-                    ctx.request_repaint();
+                    Err(err) => {
+                        log::line(&format!("Atualização automática falhou: {err}"));
+                        let _ = tx.send(WorkerMsg::UpdateStatus(None));
+                        let _ = tx.send(WorkerMsg::UpdateLog(format!(
+                            "{} v{}: {err} ({})",
+                            t(
+                                lang,
+                                "Não foi possível atualizar automaticamente para",
+                                "Could not auto-update to"
+                            ),
+                            info.version,
+                            info.html_url
+                        )));
+                    }
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    // Offline or rate-limited: log quietly without bothering the user.
-                    log::line(&format!("Verificação de atualização ignorada: {err}"));
-                }
+                ctx.request_repaint();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                log::line(&format!("Verificação de atualização ignorada: {err}"));
             }
         });
     }
 
     fn on_check_updates_manual(&mut self) {
-        self.spawn_worker("Verificando atualizações no GitHub...", |tx| {
-            match updater::check_latest() {
-                Ok(None) => {
-                    let msg = format!(
-                        "Você já está na versão mais recente (v{}).",
-                        updater::CURRENT_VERSION
-                    );
-                    show_info(&msg);
-                    msg
-                }
-                Ok(Some(info)) => {
-                    let prompt = format!(
+        let lang = self.lang();
+        let what = t(
+            lang,
+            "Verificando atualizações no GitHub...",
+            "Checking GitHub for updates...",
+        );
+        self.spawn_worker(what, move |tx| match updater::check_latest() {
+            Ok(None) => {
+                let msg = format!(
+                    "{} (v{}).",
+                    t(
+                        lang,
+                        "Você já está na versão mais recente",
+                        "You are already on the latest version"
+                    ),
+                    updater::CURRENT_VERSION
+                );
+                show_info(&msg);
+                msg
+            }
+            Ok(Some(info)) => {
+                let prompt = match lang {
+                    Lang::PtBr => format!(
                         "Nova versão v{} disponível (você está na v{}).\n\nDeseja baixar, atualizar e reiniciar o BBRadmin agora?",
-                        info.version,
-                        updater::CURRENT_VERSION
-                    );
-                    if !ask_yes_no(&prompt) {
-                        return format!("Atualização para v{} adiada pelo usuário.", info.version);
-                    }
-                    let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
-                        "Baixando v{}...",
+                        info.version, updater::CURRENT_VERSION
+                    ),
+                    Lang::EnUs => format!(
+                        "New version v{} is available (you are on v{}).\n\nDownload, update, and restart BBRadmin now?",
+                        info.version, updater::CURRENT_VERSION
+                    ),
+                };
+                if !ask_yes_no(&prompt) {
+                    return format!(
+                        "{} v{}.",
+                        t(
+                            lang,
+                            "Atualização adiada pelo usuário:",
+                            "Update postponed by user:"
+                        ),
                         info.version
-                    ))));
-                    match updater::download_and_apply(&info) {
-                        Ok(exe) => {
-                            let ver = info.version.clone();
-                            let _ = tx.send(WorkerMsg::UpdateReadyToRestart { exe, version: ver.clone() });
-                            format!("Atualização v{ver} instalada; reiniciando...")
-                        }
-                        Err(err) => {
-                            let _ = tx.send(WorkerMsg::UpdateStatus(None));
-                            let msg = format!("Falha ao atualizar para v{}: {err}", info.version);
-                            show_info(&msg);
-                            msg
-                        }
+                    );
+                }
+                let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
+                    "{} v{}...",
+                    t(lang, "Baixando", "Downloading"),
+                    info.version
+                ))));
+                match updater::download_and_apply(&info) {
+                    Ok(exe) => {
+                        let ver = info.version.clone();
+                        let _ = tx.send(WorkerMsg::UpdateReadyToRestart {
+                            exe,
+                            version: ver.clone(),
+                        });
+                        format!(
+                            "{} v{}...",
+                            t(lang, "Atualização instalada; reiniciando para", "Update installed; restarting into"),
+                            ver
+                        )
+                    }
+                    Err(err) => {
+                        let _ = tx.send(WorkerMsg::UpdateStatus(None));
+                        let msg = format!(
+                            "{} v{}: {err}",
+                            t(lang, "Falha ao atualizar para", "Failed to update to"),
+                            info.version
+                        );
+                        show_info(&msg);
+                        msg
                     }
                 }
-                Err(err) => {
-                    let msg = format!("Não foi possível verificar atualizações: {err}");
-                    show_info(&msg);
-                    msg
-                }
+            }
+            Err(err) => {
+                let msg = format!(
+                    "{}: {err}",
+                    t(
+                        lang,
+                        "Não foi possível verificar atualizações",
+                        "Could not check for updates"
+                    )
+                );
+                show_info(&msg);
+                msg
             }
         });
     }
@@ -417,20 +510,7 @@ impl BbradminApp {
             self.config.save();
         }
 
-        let launcher = bbport_launcher::load();
-        self.launcher_account_hint = if !launcher.supermedo_npid.is_empty() {
-            format!(
-                "Conta do seu launcher do bbport: {} — a mesma do Seamless co-op.",
-                launcher.supermedo_npid
-            )
-        } else {
-            "Sem conta no launcher do bbport: o servidor cria uma sozinho no primeiro entrar."
-                .to_string()
-        };
-        self.launcher_display_hint = format!(
-            "No launcher do bbport (settings.json): {}",
-            display::describe_launcher_mode(&launcher)
-        );
+        self.launcher_settings = bbport_launcher::load();
 
         if self.config.play_with.is_empty() {
             let current = input_config::current(&self.port);
@@ -439,26 +519,28 @@ impl BbradminApp {
                 self.config.save();
             }
         }
-        self.refresh_input_hint();
     }
 
-    fn refresh_input_hint(&mut self) {
+    fn input_hint(&self, lang: Lang) -> String {
         let file = if self.port.ready() {
             input_config::path_in(&self.port).to_string_lossy().to_string()
         } else {
             String::new()
         };
-        self.input_hint = if file.is_empty() {
-            format!("Agora: {}.", input_config::describe(&self.port))
+        let desc = input_config::describe_for(&self.port, lang);
+        if file.is_empty() {
+            format!("{}: {desc}.", t(lang, "Agora", "Current"))
         } else {
             format!(
-                "Agora: {}.\nArquivo: {file}",
-                input_config::describe(&self.port)
+                "{}: {desc}.\n{}: {file}",
+                t(lang, "Agora", "Current"),
+                t(lang, "Arquivo", "File")
             )
-        };
+        }
     }
 
     fn poll_background(&mut self) {
+        let lang = self.lang();
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 WorkerMsg::Done(text) => {
@@ -466,13 +548,17 @@ impl BbradminApp {
                     self.append_log(&text);
                 }
                 WorkerMsg::GameStarted { child, display } => {
-                    // Stop any previous WindowPlacer and start a fresh one for this game launch.
                     self.placer = Some(WindowPlacer::start(display));
                     self.game = Some(child);
                 }
-                WorkerMsg::RefreshInputHint => {
-                    self.refresh_input_hint();
+                WorkerMsg::TestFinished { ok, detail } => {
+                    self.test_result = Some(if ok {
+                        TestResult::Ok(detail)
+                    } else {
+                        TestResult::Fail(detail)
+                    });
                 }
+                WorkerMsg::RefreshInputHint => {}
                 WorkerMsg::UpdateStatus(status) => {
                     self.update_status = status;
                 }
@@ -489,13 +575,23 @@ impl BbradminApp {
                             }
                             Err(err) => {
                                 self.append_log(&format!(
-                                    "Atualização v{version} instalada, mas não consegui reabrir automaticamente ({err}). Feche e abra o BBRadmin."
+                                    "{} v{version} ({err}).",
+                                    t(
+                                        lang,
+                                        "Atualização instalada, mas não consegui reabrir automaticamente:",
+                                        "Update installed, but could not relaunch automatically:"
+                                    )
                                 ));
                             }
                         }
                     } else {
                         self.append_log(&format!(
-                            "Atualização v{version} já instalada em disco — será usada na próxima vez que abrir o BBRadmin."
+                            "{} v{version}.",
+                            t(
+                                lang,
+                                "Atualização instalada — será aplicada ao reabrir o BBRadmin:",
+                                "Update installed — will take effect next time you open BBRadmin:"
+                            )
                         ));
                     }
                 }
@@ -512,13 +608,20 @@ impl BbradminApp {
         }
         if exited {
             self.game = None;
-            self.placer = None; // drops & stops the WindowPlacer thread
-            self.append_log("O jogo fechou.");
+            self.placer = None;
+            self.append_log(t(lang, "O jogo fechou.", "Game closed."));
             log::line("Jogo fechou.");
-            if self.is_host() && self.server.started_by_us() && self.config.stop_server_with_game {
-                self.append_log("Parando o servidor que eu iniciei (opção marcada).");
+            if self.is_host() && self.server.started_by_us() && self.config.auto_stop_server {
+                self.append_log(t(
+                    lang,
+                    "Parando o servidor que eu iniciei (parada automática ativada).",
+                    "Stopping the server I started (auto-stop enabled).",
+                ));
                 let srv = Arc::clone(&self.server);
-                self.spawn_worker("Parando o servidor...", move |_| srv.stop());
+                self.spawn_worker(
+                    t(lang, "Parando o servidor...", "Stopping server..."),
+                    move |_| srv.stop(),
+                );
             }
         }
     }
@@ -543,17 +646,32 @@ impl BbradminApp {
     }
 
     fn on_play(&mut self) {
+        let lang = self.lang();
         self.config.save();
         if !self.port.ready() {
-            show_info("O bbport ainda não está pronto.\n\nAbra a aba Avançado, escolha a pasta do bbport (a que tem Bloodborne.exe) e clique em Verificar.");
+            show_info(t(
+                lang,
+                "O bbport ainda não está pronto.\n\nAbra a aba Avançado, escolha a pasta do bbport (a que tem Bloodborne.exe) e clique em Verificar.",
+                "bbport is not ready yet.\n\nOpen the Advanced tab, choose your bbport folder (the one with Bloodborne.exe), and click Verify.",
+            ));
             return;
         }
 
         if self.is_host() {
             let ip = self.own_address.trim().to_string();
-            if let Err(problem) = validate_ip(&ip) {
+            if let Err(problem) = validate_ip(&ip, lang) {
                 show_info(&format!(
-                    "Este PC não tem um endereço de VPN agora ({problem}).\n\nLigue o Radmin VPN e clique em Recarregar na aba Avançado."
+                    "{} ({problem}).\n\n{}",
+                    t(
+                        lang,
+                        "Este PC não tem um endereço de VPN agora",
+                        "This PC does not have a VPN address right now"
+                    ),
+                    t(
+                        lang,
+                        "Ligue o Radmin VPN e clique em Recarregar na aba Avançado.",
+                        "Turn on Radmin VPN and click Reload on the Advanced tab."
+                    )
                 ));
                 return;
             }
@@ -561,55 +679,91 @@ impl BbradminApp {
             let config = self.config.clone();
             let server = Arc::clone(&self.server);
             let auto_fw = self.auto_firewall;
-            self.spawn_worker("Hospedando o co-op...", move |tx| {
-                do_host(port, config, server, ip, auto_fw, tx)
-            });
+            self.spawn_worker(
+                t(lang, "Hospedando o co-op...", "Hosting co-op..."),
+                move |tx| do_host(port, config, server, ip, auto_fw, lang, tx),
+            );
         } else {
             let ip = self.config.remote_ip.trim().to_string();
             let port = self.port.clone();
             let config = self.config.clone();
-            self.spawn_worker("Entrando no co-op...", move |tx| {
-                do_guest(port, config, ip, tx)
-            });
+            self.spawn_worker(
+                t(lang, "Entrando no co-op...", "Joining co-op..."),
+                move |tx| do_guest(port, config, ip, lang, tx),
+            );
         }
     }
 
     fn on_start_server_only(&mut self) {
+        let lang = self.lang();
         self.config.save();
         if !self.port.ready() {
             return;
         }
         let ip = self.own_address.trim().to_string();
-        if validate_ip(&ip).is_err() {
-            show_info("Este PC não tem um endereço de VPN agora. Ligue o Radmin VPN.");
+        if validate_ip(&ip, lang).is_err() {
+            show_info(t(
+                lang,
+                "Este PC não tem um endereço de VPN agora. Ligue o Radmin VPN.",
+                "This PC does not have a VPN address right now. Turn on Radmin VPN.",
+            ));
             return;
         }
         let server = Arc::clone(&self.server);
-        self.spawn_worker("Iniciando o servidor...", move |_| match server.start(&ip) {
-            Ok(line) => format!("{line}\n{}", server.wait_until_ready(&ip, 30)),
-            Err(err) => err,
-        });
+        self.spawn_worker(
+            t(lang, "Iniciando o servidor...", "Starting server..."),
+            move |_| match server.start(&ip) {
+                Ok(line) => format!("{line}\n{}", server.wait_until_ready(&ip, 30)),
+                Err(err) => err,
+            },
+        );
     }
 
     fn on_stop_server(&mut self) {
+        let lang = self.lang();
         let server = Arc::clone(&self.server);
-        self.spawn_worker("Parando o servidor...", move |_| server.stop());
+        self.spawn_worker(
+            t(lang, "Parando o servidor...", "Stopping server..."),
+            move |_| server.stop(),
+        );
     }
 
     fn on_test_server(&mut self) {
+        let lang = self.lang();
         let ip = self.config.remote_ip.trim().to_string();
-        if validate_ip(&ip).is_err() {
-            show_info("Informe o IP do host antes de testar.");
+        if validate_ip(&ip, lang).is_err() {
+            show_info(t(
+                lang,
+                "Informe o IP do host antes de testar.",
+                "Enter the host IP before testing.",
+            ));
             return;
         }
-        self.spawn_worker("Testando o servidor...", move |_| {
-            format!("Servidor em {ip}: {}", health::describe(&ip, 2000))
-        });
+        self.test_result = Some(TestResult::Testing);
+        self.spawn_worker(
+            t(lang, "Testando o servidor...", "Testing server..."),
+            move |tx| {
+                let ok = health::reachable(&ip, 2000);
+                let detail = health::describe_for(&ip, 2000, lang);
+                let _ = tx.send(WorkerMsg::TestFinished {
+                    ok,
+                    detail: detail.clone(),
+                });
+                format!(
+                    "{} {ip}: {detail}",
+                    t(lang, "Servidor em", "Server at")
+                )
+            },
+        );
     }
 
     fn on_browse_folder(&mut self) {
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Escolha a pasta do bbport (a que tem Bloodborne.exe)");
+        let lang = self.lang();
+        let mut dialog = rfd::FileDialog::new().set_title(t(
+            lang,
+            "Escolha a pasta do bbport (a que tem Bloodborne.exe)",
+            "Choose the bbport folder (the one with Bloodborne.exe)",
+        ));
         if !self.port.root.is_empty() && Path::new(&self.port.root).is_dir() {
             dialog = dialog.set_directory(&self.port.root);
         }
@@ -619,8 +773,18 @@ impl BbradminApp {
         let chosen = bbport::inspect(&picked.to_string_lossy());
         if !chosen.ready() {
             show_info(&format!(
-                "Nessa pasta ainda falta:\n\n{}\n\nEscolha a pasta onde está o Bloodborne.exe do bbport.",
-                chosen.missing.join("\n")
+                "{}\n\n{}\n\n{}",
+                t(
+                    lang,
+                    "Nessa pasta ainda falta:",
+                    "This folder is still missing:"
+                ),
+                chosen.missing.join("\n"),
+                t(
+                    lang,
+                    "Escolha a pasta onde está o Bloodborne.exe do bbport.",
+                    "Choose the folder containing bbport's Bloodborne.exe."
+                )
             ));
             return;
         }
@@ -628,31 +792,48 @@ impl BbradminApp {
         self.config.save();
         self.refresh_detection();
         self.append_log(&format!(
-            "Pasta do bbport: {} ({})",
+            "{}: {} ({})",
+            t(lang, "Pasta do bbport", "bbport folder"),
             chosen.root,
-            chosen.describe()
+            chosen.describe_for(lang)
         ));
     }
 
     fn open_official_launcher(&mut self, said: &str) {
+        let lang = self.lang();
         if !self.port.ready() {
-            show_info("O bbport ainda não está pronto. Escolha a pasta dele na aba Avançado.");
+            show_info(t(
+                lang,
+                "O bbport ainda não está pronto. Escolha a pasta dele na aba Avançado.",
+                "bbport is not ready yet. Choose its folder on the Advanced tab.",
+            ));
             return;
         }
         let exe = Path::new(&self.port.root).join(coop_schema::GAME_EXE);
         match Command::new(&exe).current_dir(&self.port.root).spawn() {
             Ok(_) => self.append_log(said),
-            Err(err) => show_info(&format!("Não abri o launcher do bbport: {err}")),
+            Err(err) => show_info(&format!(
+                "{}: {err}",
+                t(
+                    lang,
+                    "Não abri o launcher do bbport",
+                    "Could not open bbport launcher"
+                )
+            )),
         }
     }
 
     fn open_folder(&mut self, path: &Path) {
+        let lang = self.lang();
         if path.as_os_str().is_empty() {
             return;
         }
         let _ = fs::create_dir_all(path);
         if let Err(err) = Command::new("explorer.exe").arg(path).spawn() {
-            self.append_log(&format!("Não abri a pasta ({err})."));
+            self.append_log(&format!(
+                "{} ({err}).",
+                t(lang, "Não abri a pasta", "Could not open folder")
+            ));
         }
     }
 }
@@ -661,18 +842,18 @@ impl eframe::App for BbradminApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
 
-        // Keep polling while game is running or busy so exit detection is timely.
         if self.busy || self.game.is_some() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
 
+        let lang = self.lang();
         let snap = self
             .server_snapshot
             .lock()
-            .map(|g| g.clone())
+            .map(|g| *g)
             .unwrap_or(ServerSnapshot {
                 running: false,
-                state: "parado",
+                state: ServerState::Stopped,
             });
 
         let p = Palette::of(ctx.style().visuals.dark_mode);
@@ -702,14 +883,18 @@ impl eframe::App for BbradminApp {
                             );
                         });
                         ui.label(
-                            egui::RichText::new("co-op contínuo para Bloodborne, por Radmin VPN")
-                                .size(12.0)
-                                .color(p.muted_text),
+                            egui::RichText::new(t(
+                                lang,
+                                "co-op contínuo para Bloodborne, por Radmin VPN",
+                                "seamless Bloodborne co-op over Radmin VPN",
+                            ))
+                            .size(12.0)
+                            .color(p.muted_text),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(self.port.describe())
+                            egui::RichText::new(self.port.describe_for(lang))
                                 .size(11.5)
                                 .color(p.muted_text),
                         );
@@ -757,18 +942,30 @@ impl eframe::App for BbradminApp {
                 ui.horizontal(|ui| {
                     let host = self.is_host();
                     let mut state = format!(
-                        "Servidor: {}",
-                        if host { snap.state } else { "no PC do amigo" }
+                        "{}: {}",
+                        t(lang, "Servidor", "Server"),
+                        if host {
+                            snap.state.label(lang)
+                        } else {
+                            t(lang, "no PC do amigo", "on friend's PC")
+                        }
                     );
                     if host
                         && self.port.ready()
                         && !radmin::is_vpn(radmin::kind_of_ip_only(&self.own_address))
                         && !self.networks.is_empty()
                     {
-                        state.push_str("  ·  ligue o Radmin VPN");
+                        state.push_str(t(
+                            lang,
+                            "  ·  ligue o Radmin VPN",
+                            "  ·  turn on Radmin VPN",
+                        ));
                     }
                     if self.busy {
-                        state = format!("Trabalhando...  ·  {state}");
+                        state = format!(
+                            "{}  ·  {state}",
+                            t(lang, "Trabalhando...", "Working...")
+                        );
                     }
                     if let Some(upd) = &self.update_status {
                         state = format!("{upd}  ·  {state}");
@@ -777,9 +974,9 @@ impl eframe::App for BbradminApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn_text = if self.show_log {
-                            "Esconder log"
+                            t(lang, "Esconder log", "Hide log")
                         } else {
-                            "Mostrar log"
+                            t(lang, "Mostrar log", "Show log")
                         };
                         if ui.button(btn_text).clicked() {
                             self.show_log = !self.show_log;
@@ -790,10 +987,21 @@ impl eframe::App for BbradminApp {
                             }
                         }
 
-                        if ui.button(self.config.theme.short_label()).clicked() {
+                        if ui.button(self.config.theme.short_label_for(lang)).clicked() {
                             self.config.theme = self.config.theme.next();
                             apply_theme(ctx, self.config.theme);
                             self.config.save();
+                        }
+
+                        if ui
+                            .button(t(lang, "Abrir launcher oficial", "Official launcher"))
+                            .clicked()
+                        {
+                            self.open_official_launcher(t(
+                                lang,
+                                "Launcher oficial aberto (para gráficos, FPS e mods do bbport).",
+                                "Official launcher opened (for bbport graphics, FPS, and mods).",
+                            ));
                         }
                     });
                 });
@@ -808,20 +1016,28 @@ impl eframe::App for BbradminApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, Tab::Play, "  Jogar  ");
+                    ui.selectable_value(&mut self.tab, Tab::Play, t(lang, "  Jogar  ", "  Play  "));
                     ui.selectable_value(&mut self.tab, Tab::Coop, "  Co-op  ");
-                    ui.selectable_value(&mut self.tab, Tab::Controls, "  Controles  ");
-                    ui.selectable_value(&mut self.tab, Tab::Advanced, "  Avançado  ");
+                    ui.selectable_value(
+                        &mut self.tab,
+                        Tab::Controls,
+                        t(lang, "  Controles  ", "  Controls  "),
+                    );
+                    ui.selectable_value(
+                        &mut self.tab,
+                        Tab::Advanced,
+                        t(lang, "  Avançado  ", "  Advanced  "),
+                    );
                 });
                 ui.separator();
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.tab {
-                        Tab::Play => self.render_play_tab(ui, &snap),
-                        Tab::Coop => self.render_coop_tab(ui),
-                        Tab::Controls => self.render_controls_tab(ui),
-                        Tab::Advanced => self.render_advanced_tab(ui),
+                        Tab::Play => self.render_play_tab(ui, &snap, lang),
+                        Tab::Coop => self.render_coop_tab(ui, lang),
+                        Tab::Controls => self.render_controls_tab(ui, lang),
+                        Tab::Advanced => self.render_advanced_tab(ui, lang),
                     });
             });
     }
@@ -832,7 +1048,7 @@ impl eframe::App for BbradminApp {
         if !self.restarting_for_update
             && self.is_host()
             && self.server.started_by_us()
-            && !self.config.keep_server
+            && self.config.auto_stop_server
         {
             log::line("Fechando o BBRadmin: parando o servidor que eu iniciei.");
             self.server.stop();
@@ -842,11 +1058,18 @@ impl eframe::App for BbradminApp {
 }
 
 impl BbradminApp {
-    fn render_play_tab(&mut self, ui: &mut egui::Ui, snap: &ServerSnapshot) {
+    fn render_play_tab(&mut self, ui: &mut egui::Ui, snap: &ServerSnapshot, lang: Lang) {
         let mut host = self.is_host();
-        group_box(ui, "Quem hospeda?", |ui| {
+        group_box(ui, t(lang, "Quem hospeda?", "Who is hosting?"), |ui| {
             if ui
-                .radio(host, "Eu hospedo (o servidor roda neste PC)")
+                .radio(
+                    host,
+                    t(
+                        lang,
+                        "Eu hospedo (o servidor roda neste PC)",
+                        "I'm hosting (the server runs on this PC)",
+                    ),
+                )
                 .clicked()
             {
                 self.config.role = app_config::ROLE_HOST.to_string();
@@ -854,7 +1077,14 @@ impl BbradminApp {
                 host = true;
             }
             if ui
-                .radio(!host, "Eu entro (o servidor está no PC do amigo)")
+                .radio(
+                    !host,
+                    t(
+                        lang,
+                        "Eu entro (o servidor está no PC do amigo)",
+                        "I'm joining (the server is on my friend's PC)",
+                    ),
+                )
                 .clicked()
             {
                 self.config.role = app_config::ROLE_GUEST.to_string();
@@ -864,9 +1094,13 @@ impl BbradminApp {
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Endereço", |ui| {
+        group_box(ui, t(lang, "Endereço", "Address"), |ui| {
             if host {
-                ui.label("Este PC (dê este endereço ao amigo):");
+                ui.label(t(
+                    lang,
+                    "Este PC (dê este endereço ao amigo):",
+                    "This PC (share this address with your friend):",
+                ));
                 ui.horizontal(|ui| {
                     let mut addr_display = self.own_address.clone();
                     ui.add(
@@ -874,40 +1108,70 @@ impl BbradminApp {
                             .desired_width(300.0)
                             .interactive(false),
                     );
-                    if ui.button("Copiar").clicked() && !self.own_address.is_empty() {
+                    if ui.button(t(lang, "Copiar", "Copy")).clicked()
+                        && !self.own_address.is_empty()
+                    {
                         ui.ctx().copy_text(self.own_address.clone());
                         let ip = self.own_address.clone();
-                        self.append_log(&format!("Endereço copiado: {ip}"));
+                        self.append_log(&format!(
+                            "{}: {ip}",
+                            t(lang, "Endereço copiado", "Address copied")
+                        ));
                     }
                 });
             } else {
-                ui.label("IP do host (o amigo te passa, 26.x.x.x):");
+                ui.label(t(
+                    lang,
+                    "IP do host (o amigo te passa, 26.x.x.x):",
+                    "Host IP (from your friend, 26.x.x.x):",
+                ));
                 ui.horizontal(|ui| {
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.config.remote_ip)
                             .desired_width(300.0)
                             .hint_text("26.x.x.x"),
                     );
+                    if resp.changed() {
+                        self.test_result = None;
+                    }
                     if resp.lost_focus() {
                         self.config.save();
                     }
-                    let valid = validate_ip(self.config.remote_ip.trim()).is_ok();
+                    let valid = validate_ip(self.config.remote_ip.trim(), lang).is_ok();
                     if ui
-                        .add_enabled(!self.busy && valid, egui::Button::new("Testar"))
+                        .add_enabled(
+                            !self.busy && valid,
+                            egui::Button::new(t(lang, "Testar", "Test")),
+                        )
                         .clicked()
                     {
                         self.on_test_server();
+                    }
+                    match &self.test_result {
+                        Some(TestResult::Testing) => {
+                            ui.add_space(4.0);
+                            ui.spinner();
+                        }
+                        Some(TestResult::Ok(detail)) => {
+                            ui.add_space(4.0);
+                            draw_status_badge(ui, true, detail);
+                        }
+                        Some(TestResult::Fail(detail)) => {
+                            ui.add_space(4.0);
+                            draw_status_badge(ui, false, detail);
+                        }
+                        None => {}
                     }
                 });
             }
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Começar", |ui| {
+        group_box(ui, t(lang, "Começar", "Start"), |ui| {
             ui.horizontal(|ui| {
                 let p = Palette::of(ui.visuals().dark_mode);
                 let play_btn = egui::Button::new(
-                    egui::RichText::new("Jogar co-op")
+                    egui::RichText::new(t(lang, "Jogar co-op", "Play co-op"))
                         .size(16.0)
                         .strong()
                         .color(p.play_btn_text),
@@ -925,8 +1189,12 @@ impl BbradminApp {
                     if ui
                         .add_enabled(
                             !self.busy && host && self.port.ready() && !snap.running,
-                            egui::Button::new("Só iniciar o servidor")
-                                .min_size(egui::vec2(155.0, 24.0)),
+                            egui::Button::new(t(
+                                lang,
+                                "Só iniciar o servidor",
+                                "Start server only",
+                            ))
+                            .min_size(egui::vec2(165.0, 24.0)),
                         )
                         .clicked()
                     {
@@ -935,116 +1203,130 @@ impl BbradminApp {
                     if ui
                         .add_enabled(
                             !self.busy && snap.running,
-                            egui::Button::new("Parar o servidor")
-                                .min_size(egui::vec2(155.0, 24.0)),
+                            egui::Button::new(t(lang, "Parar o servidor", "Stop server"))
+                                .min_size(egui::vec2(165.0, 24.0)),
                         )
                         .clicked()
                     {
                         self.on_stop_server();
                     }
                 });
-
-                let hint = if host {
-                    "Você hospeda: o servidor sobe e o jogo abre. Depois passe seu endereço ao amigo."
-                } else {
-                    "Você entra: o jogo abre apontando para o servidor do amigo."
-                };
-                ui.label(
-                    egui::RichText::new(hint)
-                        .size(11.5)
-                        .color(p.muted_text),
-                );
             });
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Como funciona", |ui| {
-            ui.label(
+        group_box(ui, t(lang, "Como funciona", "How it works"), |ui| {
+            ui.label(t(
+                lang,
                 "1.  Os dois ligam o Radmin VPN e entram na mesma rede (aparece um IP 26.x.x.x).\n\
                  2.  Um clica em \"Jogar co-op\" com \"Eu hospedo\" e passa o endereço ao outro (botão Copiar).\n\
                  3.  O outro escolhe \"Eu entro\", cola o endereço em \"IP do host\" e clica em \"Jogar co-op\".\n\
                  4.  No jogo, o que hospeda abre o menu, cria o time e convida; o amigo aceita o convite.\n\
-                 5.  Para sair, feche o jogo. O servidor continua rodando para o próximo encontro.\n\n\
+                 5.  Para sair, feche o jogo.\n\n\
                  As regras do co-op ficam na aba \"Co-op\"; os controles, na aba \"Controles\".",
-            );
+                "1.  Both players turn on Radmin VPN and join the same network (each gets a 26.x.x.x IP).\n\
+                 2.  The host selects \"I'm hosting\", clicks \"Play co-op\", and sends their IP (Copy button).\n\
+                 3.  The guest selects \"I'm joining\", pastes the IP into \"Host IP\", and clicks \"Play co-op\".\n\
+                 4.  In-game, the host opens the co-op menu, creates a party, and invites; the friend accepts.\n\
+                 5.  To finish, just close the game.\n\n\
+                 Co-op host rules are on the \"Co-op\" tab; controls are on the \"Controls\" tab.",
+            ));
         });
     }
 
-    fn render_coop_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_coop_tab(&mut self, ui: &mut egui::Ui, lang: Lang) {
         let p = Palette::of(ui.visuals().dark_mode);
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(t(
+                lang,
                 "As regras do líder do time: valem para o time inteiro e aparecem na tela do time \
                  dentro do jogo. Só Joining / Invading / Death mode se mudam ali. Mudanças contam \
                  do próximo start (marque antes de \"Jogar co-op\").",
-            )
+                "Party leader rules: apply to the whole party and appear on the in-game party screen. \
+                 Only Joining / Invading / Death mode can be changed in-game. Changes take effect on \
+                 the next launch (set them before clicking \"Play co-op\").",
+            ))
             .size(12.0)
             .color(p.muted_text),
         );
         ui.add_space(6.0);
 
         let mut changed = false;
+        let enemies_labels = match lang {
+            Lang::PtBr => ENEMIES_LABELS_PT,
+            Lang::EnUs => ENEMIES_LABELS_EN,
+        };
+        let tempo_labels = match lang {
+            Lang::PtBr => TEMPO_LABELS_PT,
+            Lang::EnUs => TEMPO_LABELS_EN,
+        };
 
-        group_box(ui, "Inimigos mais fortes", |ui| {
-            for (val, label) in ENEMIES_VALUES.iter().zip(ENEMIES_LABELS.iter()) {
-                let selected = self.config.rules.enemies.eq_ignore_ascii_case(val);
-                if ui.radio(selected, *label).clicked() {
-                    self.config.rules.enemies = (*val).to_string();
-                    changed = true;
+        group_box(
+            ui,
+            t(lang, "Inimigos mais fortes", "Stronger enemies"),
+            |ui| {
+                for (val, label) in ENEMIES_VALUES.iter().zip(enemies_labels.iter()) {
+                    let selected = self.config.rules.enemies.eq_ignore_ascii_case(val);
+                    if ui.radio(selected, *label).clicked() {
+                        self.config.rules.enemies = (*val).to_string();
+                        changed = true;
+                    }
                 }
-            }
-            let is_custom = self.config.rules.enemies.eq_ignore_ascii_case("custom");
-            ui.add_enabled_ui(is_custom, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(18.0);
-                    ui.label("Vida");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.config.rules.custom_hp)
-                                .desired_width(48.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label("Dano");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.config.rules.custom_damage)
-                                .desired_width(48.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label("Equilíbrio");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.config.rules.custom_poise)
-                                .desired_width(48.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
+                let is_custom = self.config.rules.enemies.eq_ignore_ascii_case("custom");
+                ui.add_enabled_ui(is_custom, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.label(t(lang, "Vida", "HP"));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.config.rules.custom_hp)
+                                    .desired_width(48.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(t(lang, "Dano", "Damage"));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.config.rules.custom_damage)
+                                    .desired_width(48.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(t(lang, "Equilíbrio", "Poise"));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.config.rules.custom_poise)
+                                    .desired_width(48.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
 
         ui.add_space(6.0);
-        group_box(ui, "Ritmo do chefe", |ui| {
-            ui.label(
+        group_box(ui, t(lang, "Ritmo do chefe", "Boss tempo"), |ui| {
+            ui.label(t(
+                lang,
                 "Nos dois de baixo o chefe descansa menos e vira mais rápido (os golpes e o dano iguais).",
-            );
+                "In the lower two options, bosses rest less and turn faster (moves and damage stay the same).",
+            ));
             let current_idx = TEMPO_VALUES
                 .iter()
                 .position(|v| self.config.rules.tempo.eq_ignore_ascii_case(v))
                 .unwrap_or(0);
             egui::ComboBox::from_id_salt("tempo_combo")
                 .width(340.0)
-                .selected_text(TEMPO_LABELS[current_idx])
+                .selected_text(tempo_labels[current_idx])
                 .show_ui(ui, |ui| {
-                    for (idx, label) in TEMPO_LABELS.iter().enumerate() {
+                    for (idx, label) in tempo_labels.iter().enumerate() {
                         if ui.selectable_label(idx == current_idx, *label).clicked() {
                             self.config.rules.tempo = TEMPO_VALUES[idx].to_string();
                             changed = true;
@@ -1054,11 +1336,15 @@ impl BbradminApp {
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Outras regras", |ui| {
+        group_box(ui, t(lang, "Outras regras", "Other rules"), |ui| {
             if ui
                 .checkbox(
                     &mut self.config.rules.rot,
-                    "Podridão (rot) — cada morte de verdade dá uma penalidade (até 5)",
+                    t(
+                        lang,
+                        "Podridão (rot) — cada morte de verdade dá uma penalidade (até 5)",
+                        "Rot — each true death adds a penalty stack (up to 5)",
+                    ),
                 )
                 .changed()
             {
@@ -1066,13 +1352,21 @@ impl BbradminApp {
             }
             note_label(
                 ui,
-                "Uma lâmpada, um nível, um chefe, seu assassino ou sua mancha de sangue tiram.",
+                t(
+                    lang,
+                    "Uma lâmpada, um nível, um chefe, seu assassino ou sua mancha de sangue tiram.",
+                    "Cleared by a lamp, leveling up, defeating a boss, killing your killer, or recovering your bloodstain.",
+                ),
             );
 
             if ui
                 .checkbox(
                     &mut self.config.rules.travel,
-                    "Viajar juntos — uma lâmpada ou lápide pergunta se leva o time inteiro",
+                    t(
+                        lang,
+                        "Viajar juntos — uma lâmpada ou lápide pergunta se leva o time inteiro",
+                        "Travel together — lamps and headstones ask to bring the whole party",
+                    ),
                 )
                 .changed()
             {
@@ -1081,7 +1375,14 @@ impl BbradminApp {
                 }
                 changed = true;
             }
-            note_label(ui, "Desligado: cada um viaja sozinho.");
+            note_label(
+                ui,
+                t(
+                    lang,
+                    "Desligado: cada um viaja sozinho.",
+                    "Off: each hunter travels individually.",
+                ),
+            );
 
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
@@ -1090,7 +1391,11 @@ impl BbradminApp {
                         self.config.rules.travel,
                         egui::Checkbox::new(
                             &mut self.config.rules.vote,
-                            "Com votação — o time tem 20 s; um \"não\" cancela a viagem (precisa de \"Viajar juntos\")",
+                            t(
+                                lang,
+                                "Com votação — o time tem 20 s; um \"não\" cancela a viagem (precisa de \"Viajar juntos\")",
+                                "With vote — party has 20 s; a single \"no\" cancels travel (requires \"Travel together\")",
+                            ),
                         ),
                     )
                     .changed()
@@ -1102,7 +1407,11 @@ impl BbradminApp {
             if ui
                 .checkbox(
                     &mut self.config.rules.revive,
-                    "Reviver os caídos — os companheiros levantam um caçador caído",
+                    t(
+                        lang,
+                        "Reviver os caídos — os companheiros levantam um caçador caído",
+                        "Revive fallen hunters — teammates can pick up a downed hunter",
+                    ),
                 )
                 .changed()
             {
@@ -1110,7 +1419,11 @@ impl BbradminApp {
             }
             note_label(
                 ui,
-                "Desligado: morre de verdade, como no jogo normal.  (Padrão: ligado.)",
+                t(
+                    lang,
+                    "Desligado: morre de verdade, como no jogo normal.  (Padrão: ligado.)",
+                    "Off: die immediately, like vanilla Bloodborne.  (Default: on.)",
+                ),
             );
         });
 
@@ -1122,38 +1435,55 @@ impl BbradminApp {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(format!(
-                    "No time, os outros veem: {}.",
-                    self.config.rules.describe()
+                    "{}: {}.",
+                    t(lang, "No time, os outros veem", "Party sees"),
+                    self.config.rules.describe_for(lang)
                 ))
                 .size(12.0)
                 .color(p.muted_text),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Pegar do bbport").clicked() {
+                if ui
+                    .button(t(lang, "Pegar do bbport", "Load from bbport"))
+                    .clicked()
+                {
                     if !self.config.take_rules_from_bbport_launcher() {
-                        show_info(
+                        show_info(t(
+                            lang,
                             "Não achei as regras no launcher do bbport.\n\nAbra o launcher do bbport, entre em \"Seamless co-op\" e escolha as regras do host por lá; depois volte e clique aqui.",
-                        );
+                            "Could not find host rules in the bbport launcher.\n\nOpen the bbport launcher, go to \"Seamless co-op\", pick your host rules there, then come back and click here.",
+                        ));
                     } else {
                         self.config.save();
-                        let desc = self.config.rules.describe();
+                        let desc = self.config.rules.describe_for(lang);
                         self.append_log(&format!(
-                            "Regras do launcher do bbport aplicadas: {desc}."
+                            "{}: {desc}.",
+                            t(
+                                lang,
+                                "Regras do launcher do bbport aplicadas",
+                                "Applied host rules from bbport launcher"
+                            )
                         ));
-                        show_info(&format!("Regras do launcher do bbport: {desc}"));
+                        show_info(&format!(
+                            "{}: {desc}",
+                            t(lang, "Regras do launcher do bbport", "bbport launcher rules")
+                        ));
                     }
                 }
             });
         });
     }
 
-    fn render_controls_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_controls_tab(&mut self, ui: &mut egui::Ui, lang: Lang) {
         let p = Palette::of(ui.visuals().dark_mode);
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(t(
+                lang,
                 "O jogo aceita teclado/mouse e controle ao mesmo tempo: as teclas e os botões do \
                  controle respondem sempre. A escolha abaixo decide só o mouse.",
-            )
+                "The game accepts keyboard/mouse and controller at the same time: keys and gamepad \
+                 buttons always respond. The choice below only controls the mouse camera.",
+            ))
             .size(12.0)
             .color(p.muted_text),
         );
@@ -1162,45 +1492,60 @@ impl BbradminApp {
         let is_keyboard = self.config.play_with != input_config::CONTROLLER;
         let mut apply_now = false;
 
-        group_box(ui, "Com o que você joga", |ui| {
-            if ui
-                .radio(
-                    is_keyboard,
-                    "Teclado e mouse — o mouse gira a câmera (layout Dark Souls III) e fica capturado no jogo",
-                )
-                .clicked()
-                && !is_keyboard
-            {
-                self.config.play_with = input_config::KEYBOARD.to_string();
-                apply_now = true;
-            }
-            if ui
-                .radio(
-                    !is_keyboard,
-                    "Controle (gamepad) — o mouse não mexe a câmera; o ponteiro fica livre",
-                )
-                .clicked()
-                && is_keyboard
-            {
-                self.config.play_with = input_config::CONTROLLER.to_string();
-                apply_now = true;
-            }
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(
-                    "Durante o jogo: F7 liga/desliga o mouse e F8 recarrega o arquivo. \
-                     As teclas continuam valendo nas duas opções.",
-                )
-                .size(11.5)
-                .color(p.muted_text),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(&self.input_hint)
+        group_box(
+            ui,
+            t(lang, "Com o que você joga", "What you play with"),
+            |ui| {
+                if ui
+                    .radio(
+                        is_keyboard,
+                        t(
+                            lang,
+                            "Teclado e mouse — o mouse gira a câmera (layout Dark Souls III) e fica capturado no jogo",
+                            "Keyboard and mouse — mouse turns the camera (Dark Souls III layout) and is captured in-game",
+                        ),
+                    )
+                    .clicked()
+                    && !is_keyboard
+                {
+                    self.config.play_with = input_config::KEYBOARD.to_string();
+                    apply_now = true;
+                }
+                if ui
+                    .radio(
+                        !is_keyboard,
+                        t(
+                            lang,
+                            "Controle (gamepad) — o mouse não mexe a câmera; o ponteiro fica livre",
+                            "Controller (gamepad) — mouse does not move the camera; cursor stays free",
+                        ),
+                    )
+                    .clicked()
+                    && is_keyboard
+                {
+                    self.config.play_with = input_config::CONTROLLER.to_string();
+                    apply_now = true;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(t(
+                        lang,
+                        "Durante o jogo: F7 liga/desliga o mouse e F8 recarrega o arquivo. \
+                         As teclas continuam valendo nas duas opções.",
+                        "In-game: F7 toggles the mouse camera and F8 reloads input.ini. \
+                         Keyboard keys work in both modes.",
+                    ))
                     .size(11.5)
                     .color(p.muted_text),
-            );
-        });
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(self.input_hint(lang))
+                        .size(11.5)
+                        .color(p.muted_text),
+                );
+            },
+        );
 
         if apply_now {
             self.config.save();
@@ -1210,59 +1555,89 @@ impl BbradminApp {
                 };
                 self.append_log(&msg);
             }
-            self.refresh_input_hint();
         }
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Aplicar agora").clicked() {
+            if ui.button(t(lang, "Aplicar agora", "Apply now")).clicked() {
                 if self.config.play_with.is_empty() {
                     self.config.play_with = input_config::KEYBOARD.to_string();
                 }
                 self.config.save();
                 if !self.port.ready() {
-                    show_info(
+                    show_info(t(
+                        lang,
                         "O bbport ainda não está pronto. Escolha a pasta dele na aba Avançado.",
-                    );
+                        "bbport is not ready yet. Choose its folder on the Advanced tab.",
+                    ));
                 } else {
                     let msg = match input_config::apply(&self.port, &self.config.play_with) {
                         Ok(m) | Err(m) => m,
                     };
                     self.append_log(&msg);
-                    self.refresh_input_hint();
                 }
             }
-            if ui.button("Restaurar input.ini").clicked() && self.port.ready() {
+            if ui
+                .button(t(lang, "Restaurar input.ini", "Restore input.ini"))
+                .clicked()
+                && self.port.ready()
+            {
                 let msg = match input_config::restore(&self.port) {
                     Ok(m) | Err(m) => m,
                 };
                 self.append_log(&msg);
                 show_info(&msg);
-                self.refresh_input_hint();
             }
-            if ui.button("Abrir launcher do bbport").clicked() {
-                self.open_official_launcher(
+            if ui
+                .button(t(
+                    lang,
+                    "Abrir launcher do bbport",
+                    "Open bbport launcher",
+                ))
+                .clicked()
+            {
+                self.open_official_launcher(t(
+                    lang,
                     "Launcher do bbport aberto. Escolha a página \"Controles\" para trocar teclas e botões.",
-                );
+                    "bbport launcher opened. Go to the \"Controls\" page to rebind keys and buttons.",
+                ));
             }
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Trocar tecla por tecla, ou botão do controle", |ui| {
-            ui.label(
-                "O BBRadmin só alterna teclado+mouse / controle (acima). Para escolher cada tecla e cada \
-                 botão, use a página Controles do launcher do bbport (botão acima): lá dá para clicar num \
-                 campo e apertar a tecla ou o botão do controle.\n\n\
-                 O arquivo é o input.ini da pasta do bbport. O BBRadmin guarda uma cópia dele \
-                 (input.ini.bbradmin-bak) antes de mexer, e \"Restaurar input.ini\" devolve a sua.",
-            );
-        });
+        group_box(
+            ui,
+            t(
+                lang,
+                "Trocar tecla por tecla, ou botão do controle",
+                "Rebinding individual keys or controller buttons",
+            ),
+            |ui| {
+                ui.label(t(
+                    lang,
+                    "O BBRadmin só alterna teclado+mouse / controle (acima). Para escolher cada tecla e cada \
+                     botão, use a página Controles do launcher do bbport (botão acima): lá dá para clicar num \
+                     campo e apertar a tecla ou o botão do controle.\n\n\
+                     O arquivo é o input.ini da pasta do bbport. O BBRadmin guarda uma cópia dele \
+                     (input.ini.bbradmin-bak) antes de mexer, e \"Restaurar input.ini\" devolve a sua.",
+                    "BBRadmin only toggles keyboard+mouse / controller above. To rebind individual keys \
+                     or gamepad buttons, use the bbport launcher's Controls page (button above).\n\n\
+                     The file is input.ini inside the bbport folder. BBRadmin keeps a backup \
+                     (input.ini.bbradmin-bak) before editing, and \"Restore input.ini\" restores yours.",
+                ));
+            },
+        );
     }
 
-    fn render_advanced_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_advanced_tab(&mut self, ui: &mut egui::Ui, lang: Lang) {
         let p = Palette::of(ui.visuals().dark_mode);
-        group_box(ui, "Pasta do bbport", |ui| {
-            ui.label("A que tem o Bloodborne.exe:");
+
+        group_box(ui, t(lang, "Pasta do bbport", "bbport folder"), |ui| {
+            ui.label(t(
+                lang,
+                "A que tem o Bloodborne.exe:",
+                "The folder containing Bloodborne.exe:",
+            ));
             ui.horizontal(|ui| {
                 let mut root_disp = self.port.root.clone();
                 ui.add(
@@ -1270,31 +1645,44 @@ impl BbradminApp {
                         .desired_width(420.0)
                         .interactive(false),
                 );
-                if ui.button("Procurar...").clicked() {
+                if ui.button(t(lang, "Procurar...", "Browse...")).clicked() {
                     self.on_browse_folder();
                 }
-                if ui.button("Verificar").clicked() {
+                if ui.button(t(lang, "Verificar", "Verify")).clicked() {
                     self.refresh_detection();
-                    let mut rep = format!("{}\n", self.port.describe());
+                    let mut rep = format!("{}\n", self.port.describe_for(lang));
                     for m in &self.port.missing {
-                        rep.push_str(&format!("FALTA: {m}\n"));
+                        rep.push_str(&format!("{}: {m}\n", t(lang, "FALTA", "MISSING")));
                     }
                     for n in &self.port.notes {
-                        rep.push_str(&format!("aviso: {n}\n"));
+                        rep.push_str(&format!("{}: {n}\n", t(lang, "aviso", "note")));
                     }
                     self.append_log(&rep);
                     show_info(&rep);
                 }
             });
             let info_text = if !self.port.missing.is_empty() {
-                format!("Não deu para usar: {}", self.port.missing.join(", "))
+                format!(
+                    "{}: {}",
+                    t(lang, "Não deu para usar", "Cannot use this folder"),
+                    self.port.missing.join(", ")
+                )
             } else if !self.port.notes.is_empty() {
-                format!("{} · observe: {}", self.port.root, self.port.notes.join(", "))
+                format!(
+                    "{} · {}: {}",
+                    self.port.root,
+                    t(lang, "observe", "note"),
+                    self.port.notes.join(", ")
+                )
             } else if !self.port.root.is_empty() {
-                self.port.describe()
+                self.port.describe_for(lang)
             } else {
-                "Escolha a pasta onde você descompactou o bbport (a que tem Bloodborne.exe)."
-                    .to_string()
+                t(
+                    lang,
+                    "Escolha a pasta onde você descompactou o bbport (a que tem Bloodborne.exe).",
+                    "Choose the folder where you extracted bbport (containing Bloodborne.exe).",
+                )
+                .to_string()
             };
             ui.label(
                 egui::RichText::new(info_text)
@@ -1304,32 +1692,12 @@ impl BbradminApp {
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Modo de tela (tela cheia / sem bordas)", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Ao iniciar o jogo:");
-                let current = self.config.display_mode;
-                egui::ComboBox::from_id_salt("display_mode_combo")
-                    .width(380.0)
-                    .selected_text(current.label())
-                    .show_ui(ui, |ui| {
-                        for &mode in DisplayMode::ALL {
-                            if ui.selectable_label(mode == current, mode.label()).clicked() {
-                                self.config.display_mode = mode;
-                                self.config.save();
-                            }
-                        }
-                    });
-            });
-            ui.label(
-                egui::RichText::new(&self.launcher_display_hint)
-                    .size(11.5)
-                    .color(p.muted_text),
-            );
-        });
-
-        ui.add_space(6.0);
-        group_box(ui, "Conta do co-op", |ui| {
-            ui.label("Id do jogador (cada um dos dois usa um diferente):");
+        group_box(ui, t(lang, "Conta do co-op", "Co-op account"), |ui| {
+            ui.label(t(
+                lang,
+                "Id do jogador (cada um dos dois usa um diferente):",
+                "Player ID (each player uses a different one):",
+            ));
             if ui
                 .add(egui::TextEdit::singleline(&mut self.config.account).desired_width(240.0))
                 .lost_focus()
@@ -1338,7 +1706,7 @@ impl BbradminApp {
                 self.config.save();
             }
 
-            ui.label("Senha:");
+            ui.label(t(lang, "Senha:", "Password:"));
             ui.horizontal(|ui| {
                 if ui
                     .add(
@@ -1350,54 +1718,104 @@ impl BbradminApp {
                 {
                     self.config.save();
                 }
-                ui.checkbox(&mut self.show_password, "Mostrar");
-                if ui.button("Gerar nova").clicked() {
+                ui.checkbox(&mut self.show_password, t(lang, "Mostrar", "Show"));
+                if ui.button(t(lang, "Gerar nova", "Generate")).clicked() {
                     self.config.password = AppConfig::new_password();
                     self.show_password = true;
                     self.config.save();
-                    self.append_log(
+                    self.append_log(t(
+                        lang,
                         "Senha nova gerada (os dois jogadores podem ter senhas diferentes).",
-                    );
+                        "New password generated (both players can have different passwords).",
+                    ));
                 }
-                if ui.button("Usar do bbport").clicked() {
+                if ui
+                    .button(t(lang, "Usar do bbport", "Use from bbport"))
+                    .clicked()
+                {
                     if !self.config.take_from_bbport_launcher() {
-                        show_info(
+                        show_info(t(
+                            lang,
                             "Não achei uma conta no launcher do bbport.\n\nAbra o launcher do bbport, entre em \"Seamless co-op\" e faça o login por lá uma vez; depois volte e clique aqui.",
-                        );
+                            "No account found in the bbport launcher.\n\nOpen the bbport launcher, go to \"Seamless co-op\" and sign in once; then come back and click here.",
+                        ));
                     } else {
                         self.config.save();
                         let acc = self.config.account.clone();
                         self.append_log(&format!(
-                            "Conta do launcher do bbport aplicada: {acc}."
+                            "{}: {acc}.",
+                            t(
+                                lang,
+                                "Conta do launcher do bbport aplicada",
+                                "Applied account from bbport launcher"
+                            )
                         ));
-                        show_info(&format!("Conta do launcher do bbport aplicada: {acc}"));
+                        show_info(&format!(
+                            "{}: {acc}",
+                            t(
+                                lang,
+                                "Conta do launcher do bbport aplicada",
+                                "Applied bbport launcher account"
+                            )
+                        ));
                     }
                 }
             });
+            let account_hint = if !self.launcher_settings.supermedo_npid.is_empty() {
+                format!(
+                    "{}: {} — {}",
+                    t(
+                        lang,
+                        "Conta do seu launcher do bbport",
+                        "Your bbport launcher account"
+                    ),
+                    self.launcher_settings.supermedo_npid,
+                    t(
+                        lang,
+                        "a mesma do Seamless co-op.",
+                        "same as Seamless co-op."
+                    )
+                )
+            } else {
+                t(
+                    lang,
+                    "Sem conta no launcher do bbport: o servidor cria uma sozinho no primeiro entrar.",
+                    "No account in bbport launcher: the server creates one automatically on first sign-in.",
+                )
+                .to_string()
+            };
             ui.label(
-                egui::RichText::new(&self.launcher_account_hint)
+                egui::RichText::new(account_hint)
                     .size(11.5)
                     .color(p.muted_text),
             );
         });
 
         ui.add_space(6.0);
-        group_box(ui, "Opções", |ui| {
+        group_box(ui, t(lang, "Opções", "Options"), |ui| {
             ui.horizontal(|ui| {
-                ui.label("Tema:");
-                let current_theme = self.config.theme;
-                egui::ComboBox::from_id_salt("theme_combo")
-                    .width(260.0)
-                    .selected_text(current_theme.label())
+                ui.label(t(lang, "Idioma:", "Language:"));
+                let current_lang = self.config.lang;
+                egui::ComboBox::from_id_salt("lang_combo")
+                    .width(220.0)
+                    .selected_text(current_lang.label(lang))
                     .show_ui(ui, |ui| {
-                        for &mode in ThemeMode::ALL {
+                        for &mode in LangMode::ALL {
                             if ui
-                                .selectable_label(mode == current_theme, mode.label())
+                                .selectable_label(mode == current_lang, mode.label(lang))
                                 .clicked()
                             {
-                                self.config.theme = mode;
-                                apply_theme(ui.ctx(), mode);
+                                self.config.lang = mode;
                                 self.config.save();
+                                let new_lang = self.config.lang.resolve();
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                                    t(
+                                        new_lang,
+                                        "BBRadmin · co-op em Radmin VPN",
+                                        "BBRadmin · Radmin VPN co-op",
+                                    )
+                                    .to_string(),
+                                ));
                             }
                         }
                     });
@@ -1406,7 +1824,11 @@ impl BbradminApp {
             if ui
                 .checkbox(
                     &mut self.config.auto_update,
-                    "Atualizar automaticamente ao abrir (via GitHub Releases)",
+                    t(
+                        lang,
+                        "Atualizar automaticamente ao abrir (via GitHub Releases)",
+                        "Automatically update on startup (via GitHub Releases)",
+                    ),
                 )
                 .changed()
             {
@@ -1414,17 +1836,12 @@ impl BbradminApp {
             }
             if ui
                 .checkbox(
-                    &mut self.config.keep_server,
-                    "Deixar o servidor rodando quando eu fechar o BBRadmin",
-                )
-                .changed()
-            {
-                self.config.save();
-            }
-            if ui
-                .checkbox(
-                    &mut self.config.stop_server_with_game,
-                    "Parar o servidor que eu iniciei quando o jogo fechar",
+                    &mut self.config.auto_stop_server,
+                    t(
+                        lang,
+                        "Parar o servidor automaticamente ao fechar o jogo ou o BBRadmin",
+                        "Automatically stop the server when the game or BBRadmin closes",
+                    ),
                 )
                 .changed()
             {
@@ -1432,24 +1849,50 @@ impl BbradminApp {
             }
             ui.checkbox(
                 &mut self.auto_firewall,
-                "Pedir as regras de firewall antes de hospedar",
+                t(
+                    lang,
+                    "Pedir as regras de firewall antes de hospedar",
+                    "Prompt to install firewall rules before hosting",
+                ),
             );
         });
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(!self.busy, egui::Button::new("Instalar regras de firewall"))
+                .add_enabled(
+                    !self.busy,
+                    egui::Button::new(t(
+                        lang,
+                        "Instalar regras de firewall",
+                        "Install firewall rules",
+                    )),
+                )
                 .clicked()
             {
-                self.spawn_worker("Instalando as regras de firewall (UAC)...", |_| {
-                    install_firewall_elevated()
-                });
+                self.spawn_worker(
+                    t(
+                        lang,
+                        "Instalando as regras de firewall (UAC)...",
+                        "Installing firewall rules (UAC)...",
+                    ),
+                    move |_| install_firewall_elevated(lang),
+                );
             }
-            if ui.button("Restaurar overrides").clicked() && self.port.ready() {
+            if ui
+                .button(t(lang, "Restaurar overrides", "Restore overrides"))
+                .clicked()
+                && self.port.ready()
+            {
                 let confirm = ask_yes_no(&format!(
-                    "Voltar o {} ao que estava antes?\n\n(o bbport volta a usar o servidor dele)",
-                    coop_schema::OVERRIDES_FILE
+                    "{} {}?\n\n{}",
+                    t(lang, "Voltar o", "Restore"),
+                    coop_schema::OVERRIDES_FILE,
+                    t(
+                        lang,
+                        "(o bbport volta a usar o servidor dele)",
+                        "(bbport will go back to using its own server)"
+                    )
                 ));
                 if confirm {
                     let msg = match overrides::restore(&self.port) {
@@ -1459,48 +1902,104 @@ impl BbradminApp {
                     show_info(&msg);
                 }
             }
-            if ui.button("Abrir launcher oficial").clicked() {
-                self.open_official_launcher(
-                    "Launcher oficial aberto (para gráficos, FPS e mods do bbport).",
-                );
-            }
-            if ui.button("Recarregar").clicked() {
+            if ui.button(t(lang, "Recarregar", "Reload")).clicked() {
                 self.refresh_detection();
+            }
+            if ui
+                .add_enabled(
+                    !self.busy,
+                    egui::Button::new(t(lang, "Verificar atualizações", "Check for updates")),
+                )
+                .clicked()
+            {
+                self.on_check_updates_manual();
             }
         });
 
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Abrir pasta de logs").clicked() {
+            if ui
+                .button(t(lang, "Abrir pasta de logs", "Open logs folder"))
+                .clicked()
+            {
                 let log_dir = Path::new(&self.port.root)
                     .join(coop_schema::COOP_USER_DIR)
                     .join("log");
                 self.open_folder(&log_dir);
             }
-            if ui.button("Abrir pasta do bbport").clicked() {
+            if ui
+                .button(t(lang, "Abrir pasta do bbport", "Open bbport folder"))
+                .clicked()
+            {
                 let root = Path::new(&self.port.root).to_path_buf();
                 self.open_folder(&root);
             }
-            if ui.button("Ver o que um start faria").clicked() {
+            if ui
+                .button(t(
+                    lang,
+                    "Ver o que um start faria",
+                    "Preview launch (dry-run)",
+                ))
+                .clicked()
+            {
                 self.config.save();
                 dry_run::run(&self.config, false);
                 let path = dry_run::file_path();
                 if let Ok(content) = fs::read_to_string(&path) {
-                    self.append_log(&format!("Relatório do dry-run:\n{content}"));
+                    self.append_log(&format!(
+                        "{}:\n{content}",
+                        t(lang, "Relatório do dry-run", "Dry-run report")
+                    ));
                 }
                 let _ = Command::new("cmd.exe")
                     .args(["/c", "start", "", &path.to_string_lossy()])
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn();
             }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Verificar atualizações"))
-                .clicked()
-            {
-                self.on_check_updates_manual();
-            }
         });
     }
+}
+
+/// Draws a crisp vector circle badge (green with white checkmark, or red with white X) + hover tooltip.
+fn draw_status_badge(ui: &mut egui::Ui, ok: bool, tooltip: &str) {
+    let size = egui::vec2(20.0, 20.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    let center = rect.center();
+    let radius = 9.0_f32;
+    let fill = if ok {
+        egui::Color32::from_rgb(38, 166, 91)
+    } else {
+        egui::Color32::from_rgb(214, 58, 58)
+    };
+    painter.circle_filled(center, radius, fill);
+
+    let stroke = egui::Stroke::new(2.0_f32, egui::Color32::WHITE);
+    if ok {
+        let p1 = egui::pos2(center.x - 4.2, center.y + 0.3);
+        let p2 = egui::pos2(center.x - 1.2, center.y + 3.4);
+        let p3 = egui::pos2(center.x + 4.5, center.y - 3.2);
+        painter.line_segment([p1, p2], stroke);
+        painter.line_segment([p2, p3], stroke);
+    } else {
+        let d = 3.6_f32;
+        painter.line_segment(
+            [
+                egui::pos2(center.x - d, center.y - d),
+                egui::pos2(center.x + d, center.y + d),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x + d, center.y - d),
+                egui::pos2(center.x - d, center.y + d),
+            ],
+            stroke,
+        );
+    }
+
+    response.on_hover_text(tooltip);
 }
 
 fn group_box(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -1531,13 +2030,13 @@ fn note_label(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn validate_ip(ip: &str) -> Result<(), &'static str> {
+fn validate_ip(ip: &str, lang: Lang) -> Result<(), &'static str> {
     if ip.is_empty() {
-        return Err("sem endereço");
+        return Err(t(lang, "sem endereço", "no address"));
     }
     ip.parse::<Ipv4Addr>()
         .map(|_| ())
-        .map_err(|_| "não é um endereço IPv4")
+        .map_err(|_| t(lang, "não é um endereço IPv4", "not an IPv4 address"))
 }
 
 fn do_host(
@@ -1546,58 +2045,104 @@ fn do_host(
     server: Arc<ServerController>,
     ip: String,
     auto_firewall: bool,
+    lang: Lang,
     tx: Sender<WorkerMsg>,
 ) -> String {
     let mut say = String::new();
 
     let missing = firewall::missing();
     if !missing.is_empty() && auto_firewall {
-        let prompt = format!(
-            "As regras de firewall do BBRadmin ainda não estão instaladas ({}).\n\nSem elas o amigo pode não conseguir entrar. Instalar agora? (pede administrador)",
-            missing.join(", ")
-        );
+        let prompt = match lang {
+            Lang::PtBr => format!(
+                "As regras de firewall do BBRadmin ainda não estão instaladas ({}).\n\nSem elas o amigo pode não conseguir entrar. Instalar agora? (pede administrador)",
+                missing.join(", ")
+            ),
+            Lang::EnUs => format!(
+                "BBRadmin firewall rules are not installed yet ({}).\n\nWithout them, friends may not be able to join. Install now? (asks for administrator)",
+                missing.join(", ")
+            ),
+        };
         if ask_yes_no(&prompt) {
-            say.push_str(&install_firewall_elevated());
+            say.push_str(&install_firewall_elevated(lang));
             say.push('\n');
         }
     }
     if !firewall::missing().is_empty() {
-        say.push_str(
+        say.push_str(t(
+            lang,
             "Sem todas as regras de firewall: se o amigo não entrar, instale-as na aba Avançado.\n",
-        );
+            "Not all firewall rules are installed: if your friend cannot join, install them on the Advanced tab.\n",
+        ));
     }
 
     if !server.running() {
         match server.start(&ip) {
             Ok(line) => say.push_str(&format!("{line}\n")),
             Err(err) => {
-                say.push_str(&format!("{err}\nNão vou abrir o jogo sem servidor.\n"));
+                say.push_str(&format!(
+                    "{err}\n{}\n",
+                    t(
+                        lang,
+                        "Não vou abrir o jogo sem servidor.",
+                        "Not launching the game without the server."
+                    )
+                ));
                 return say;
             }
         }
         say.push_str(&format!("{}\n", server.wait_until_ready(&ip, 30)));
         if !server.backend_answers() {
-            say.push_str("Não vou abrir o jogo: o backend 20443 não respondeu.\n");
+            say.push_str(t(
+                lang,
+                "Não vou abrir o jogo: o backend 20443 não respondeu.\n",
+                "Not launching the game: backend 20443 did not respond.\n",
+            ));
             return say;
         }
     } else {
-        say.push_str("O servidor já estava em execução.\n");
+        say.push_str(t(
+            lang,
+            "O servidor já estava em execução.\n",
+            "Server was already running.\n",
+        ));
     }
 
-    say.push_str(&format!("Endereço para o amigo: {ip}  (Radmin VPN)\n"));
-    start_game(&port, &config, true, &ip, &mut say, tx);
+    say.push_str(&format!(
+        "{}: {ip}  (Radmin VPN)\n",
+        t(lang, "Endereço para o amigo", "Address for your friend")
+    ));
+    start_game(&port, &config, true, &ip, lang, &mut say, tx);
     say
 }
 
-fn do_guest(port: BbportInfo, config: AppConfig, ip: String, tx: Sender<WorkerMsg>) -> String {
-    if validate_ip(&ip).is_err() {
-        return "Informe o IP do host (26.x.x.x), aquele que o amigo te passou.".to_string();
+fn do_guest(
+    port: BbportInfo,
+    config: AppConfig,
+    ip: String,
+    lang: Lang,
+    tx: Sender<WorkerMsg>,
+) -> String {
+    if validate_ip(&ip, lang).is_err() {
+        return t(
+            lang,
+            "Informe o IP do host (26.x.x.x), aquele que o amigo te passou.",
+            "Enter the host IP (26.x.x.x) shared by your friend.",
+        )
+        .to_string();
     }
-    let mut say = format!("Servidor do amigo: {}\n", health::describe(&ip, 1500));
+    let mut say = format!(
+        "{}: {}\n",
+        t(lang, "Servidor do amigo", "Friend's server"),
+        health::describe_for(&ip, 1500, lang)
+    );
     if !health::reachable(&ip, 1500) {
-        say.push_str("Aviso: o servidor do amigo não respondeu. Confira se o Radmin VPN está ligado nos dois e se o host já hospedou.\n");
+        say.push_str(t(
+            lang,
+            "Aviso: o servidor do amigo não respondeu. Confira se o Radmin VPN está ligado nos dois e se o host já hospedou.\n",
+            "Warning: your friend's server did not respond. Check that Radmin VPN is on for both players and the host has started hosting.\n",
+        ));
     }
-    start_game(&port, &config, false, &ip, &mut say, tx);
+    start_game(&port, &config, false, &ip, lang, &mut say, tx);
     say
 }
 
@@ -1606,6 +2151,7 @@ fn start_game(
     config: &AppConfig,
     is_host: bool,
     ip: &str,
+    lang: Lang,
     say: &mut String,
     tx: Sender<WorkerMsg>,
 ) {
@@ -1613,7 +2159,12 @@ fn start_game(
         Ok(line) => say.push_str(&format!("{line}\n")),
         Err(err) => {
             say.push_str(&format!(
-                "{err}\nParei: sem este arquivo o jogo procuraria o servidor da Sony.\n"
+                "{err}\n{}\n",
+                t(
+                    lang,
+                    "Parei: sem este arquivo o jogo procuraria o servidor da Sony.",
+                    "Stopped: without this file the game would try to reach Sony's server."
+                )
             ));
             return;
         }
@@ -1629,7 +2180,11 @@ fn start_game(
 
     let running = bbport::running_game_pids();
     if !running.is_empty() {
-        say.push_str("Fechando o jogo que já estava aberto...\n");
+        say.push_str(t(
+            lang,
+            "Fechando o jogo que já estava aberto...\n",
+            "Closing already-running game...\n",
+        ));
         bbport::close_game(&running);
     }
 
@@ -1644,35 +2199,66 @@ fn start_game(
         &config.account,
         &config.password,
         &rules,
-        config.display_mode,
     );
 
     match game_environment::start(port, &plan) {
         Ok(child) => {
             let pid = child.id();
-            say.push_str(&format!("Modo de tela: {}.\n", plan.display.describe()));
+            say.push_str(&format!(
+                "{}: {}.\n",
+                t(lang, "Modo de tela", "Display mode"),
+                plan.display.describe()
+            ));
             if is_host {
-                say.push_str(&format!("Regras do host: {}.\n", rules.describe()));
+                say.push_str(&format!(
+                    "{}: {}.\n",
+                    t(lang, "Regras do host", "Host rules"),
+                    rules.describe_for(lang)
+                ));
             } else {
-                say.push_str("Regras do co-op: as do líder (você entrou no time dele).\n");
+                say.push_str(t(
+                    lang,
+                    "Regras do co-op: as do líder (você entrou no time dele).\n",
+                    "Co-op rules: leader's rules (you joined their party).\n",
+                ));
             }
-            say.push_str(&format!("Jogo aberto (pid {pid}).\n"));
-            say.push_str("No jogo: abra o menu, entre no time e convide o amigo.\n");
+            say.push_str(&format!(
+                "{} (pid {pid}).\n",
+                t(lang, "Jogo aberto", "Game launched")
+            ));
+            say.push_str(t(
+                lang,
+                "No jogo: abra o menu, entre no time e convide o amigo.\n",
+                "In-game: open the menu, enter the party screen, and invite your friend.\n",
+            ));
             let _ = tx.send(WorkerMsg::GameStarted {
                 child,
                 display: plan.display,
             });
         }
         Err(err) => {
-            say.push_str(&format!("Não abri o jogo: {err}\n"));
+            say.push_str(&format!(
+                "{}: {err}\n",
+                t(lang, "Não abri o jogo", "Could not launch the game")
+            ));
         }
     }
 }
 
-fn install_firewall_elevated() -> String {
+fn install_firewall_elevated(lang: Lang) -> String {
     let Ok(exe) = std::env::current_exe() else {
         return format!(
-            "Não localizei o executável do BBRadmin.\nVocê pode colar os comandos num console de administrador:\n{}",
+            "{}\n{}\n{}",
+            t(
+                lang,
+                "Não localizei o executável do BBRadmin.",
+                "Could not locate the BBRadmin executable."
+            ),
+            t(
+                lang,
+                "Você pode colar os comandos num console de administrador:",
+                "You can paste these commands into an administrator console:"
+            ),
             firewall::manual_commands()
         );
     };
@@ -1695,7 +2281,17 @@ fn install_firewall_elevated() -> String {
     let ok = unsafe { ShellExecuteExW(&mut sei) };
     if ok == 0 {
         return format!(
-            "Não elevei o BBRadmin (UAC cancelado ou bloqueado).\nVocê pode colar os comandos num console de administrador:\n{}",
+            "{}\n{}\n{}",
+            t(
+                lang,
+                "Não elevei o BBRadmin (UAC cancelado ou bloqueado).",
+                "Could not elevate BBRadmin (UAC cancelled or blocked)."
+            ),
+            t(
+                lang,
+                "Você pode colar os comandos num console de administrador:",
+                "You can paste these commands into an administrator console:"
+            ),
             firewall::manual_commands()
         );
     }
@@ -1710,9 +2306,20 @@ fn install_firewall_elevated() -> String {
     let report = fs::read_to_string(app_config::firewall_report_path()).unwrap_or_default();
     let still = firewall::missing();
     if still.is_empty() {
-        format!("Firewall pronto: as três regras estão instaladas.\n{report}")
+        format!(
+            "{}\n{report}",
+            t(
+                lang,
+                "Firewall pronto: as três regras estão instaladas.",
+                "Firewall ready: all three rules are installed."
+            )
+        )
     } else {
-        format!("Ainda faltam regras: {}\n{report}", still.join(", "))
+        format!(
+            "{}: {}\n{report}",
+            t(lang, "Ainda faltam regras", "Still missing rules"),
+            still.join(", ")
+        )
     }
 }
 

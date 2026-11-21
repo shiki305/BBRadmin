@@ -72,18 +72,23 @@ impl HostRules {
     }
 
     pub fn describe(&self) -> String {
+        self.describe_for(crate::core::i18n::Lang::PtBr)
+    }
+
+    pub fn describe_for(&self, lang: crate::core::i18n::Lang) -> String {
+        use crate::core::i18n::t;
         let rules = self.text();
         let enemies = self.enemies_text();
         if rules.is_empty() && enemies.is_empty() {
-            return "nenhuma (padrão)".to_string();
+            return t(lang, "nenhuma (padrão)", "none (default)").to_string();
         }
         let mut shown = if !rules.is_empty() {
             rules
         } else {
-            "sem outras regras".to_string()
+            t(lang, "sem outras regras", "no other rules").to_string()
         };
         if !enemies.is_empty() {
-            shown.push_str(" · inimigos ");
+            shown.push_str(t(lang, " · inimigos ", " · enemies "));
             shown.push_str(&enemies);
         }
         shown

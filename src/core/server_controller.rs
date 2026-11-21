@@ -12,8 +12,30 @@ use std::time::{Duration, Instant};
 
 use crate::core::coop_schema;
 use crate::core::health;
+use crate::core::i18n::{t, Lang};
 use crate::core::log;
 use crate::core::server_assets;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Stopped,
+    Running,
+    RunningNoBackend,
+}
+
+impl ServerState {
+    pub fn label(self, lang: Lang) -> &'static str {
+        match self {
+            Self::Stopped => t(lang, "parado", "stopped"),
+            Self::Running => t(lang, "em execução", "running"),
+            Self::RunningNoBackend => t(
+                lang,
+                "em execução, mas o backend (20443) não responde",
+                "running, but backend (20443) is not responding",
+            ),
+        }
+    }
+}
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -60,14 +82,14 @@ impl ServerController {
         health::tcp("127.0.0.1", coop_schema::BACKEND_PORT, 400)
     }
 
-    pub fn state(&self) -> &'static str {
+    pub fn state_code(&self) -> ServerState {
         if !self.running() {
-            return "parado";
+            return ServerState::Stopped;
         }
         if self.backend_answers() {
-            "em execução"
+            ServerState::Running
         } else {
-            "em execução, mas o backend (20443) não responde"
+            ServerState::RunningNoBackend
         }
     }
 

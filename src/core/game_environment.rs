@@ -15,7 +15,7 @@ use std::process::{Child, Command};
 use crate::core::bbport::{self, BbportInfo};
 use crate::core::bbport_launcher::{self, LauncherSettings};
 use crate::core::coop_schema;
-use crate::core::display::{self, DisplayMode, ResolvedDisplay};
+use crate::core::display::{self, ResolvedDisplay};
 use crate::core::host_rules::HostRules;
 use crate::core::log;
 use crate::core::overrides;
@@ -97,10 +97,9 @@ pub fn build(
     account: &str,
     password: &str,
     rules: &HostRules,
-    display_override: DisplayMode,
 ) -> PlayPlan {
     let launcher = bbport_launcher::load();
-    build_with_launcher(port, host_ip, account, password, rules, display_override, &launcher)
+    build_with_launcher(port, host_ip, account, password, rules, &launcher)
 }
 
 pub fn build_with_launcher(
@@ -109,7 +108,6 @@ pub fn build_with_launcher(
     account: &str,
     password: &str,
     rules: &HostRules,
-    display_override: DisplayMode,
     launcher: &LauncherSettings,
 ) -> PlayPlan {
     let mut env_map = BTreeMap::new();
@@ -123,7 +121,7 @@ pub fn build_with_launcher(
     }
 
     let output_res = bbport::read_output_res(port);
-    let resolved_display = display::resolve(display_override, launcher, output_res);
+    let resolved_display = display::resolve(launcher, output_res);
 
     // ---- 1. Forward bbport launcher settings (mirrors bbport_launcher_win.game_environment) ----
     env_map.insert(

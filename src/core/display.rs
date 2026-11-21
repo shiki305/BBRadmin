@@ -54,55 +54,6 @@ const FRAME_MASK: isize = (WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX) as isize
 const EDGES_MASK: isize =
     (WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE) as isize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DisplayMode {
-    FollowLauncher,
-    Borderless,
-    Fullscreen,
-    Exclusive,
-    Windowed,
-}
-
-impl DisplayMode {
-    pub const ALL: &[DisplayMode] = &[
-        DisplayMode::FollowLauncher,
-        DisplayMode::Borderless,
-        DisplayMode::Fullscreen,
-        DisplayMode::Exclusive,
-        DisplayMode::Windowed,
-    ];
-
-    pub fn from_config(val: &str) -> Self {
-        match val.trim().to_ascii_lowercase().as_str() {
-            "borderless" => Self::Borderless,
-            "fullscreen" => Self::Fullscreen,
-            "exclusive" => Self::Exclusive,
-            "windowed" => Self::Windowed,
-            _ => Self::FollowLauncher,
-        }
-    }
-
-    pub fn as_config(self) -> &'static str {
-        match self {
-            Self::FollowLauncher => "",
-            Self::Borderless => "borderless",
-            Self::Fullscreen => "fullscreen",
-            Self::Exclusive => "exclusive",
-            Self::Windowed => "windowed",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::FollowLauncher => "Seguir o launcher do bbport (padrão)",
-            Self::Borderless => "Tela cheia sem bordas (borderless — Alt+Tab instantâneo)",
-            Self::Fullscreen => "Tela cheia (SDL borderless)",
-            Self::Exclusive => "Tela cheia exclusiva",
-            Self::Windowed => "Janela",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ResolvedDisplay {
     pub bb_fullscreen: bool,
@@ -131,26 +82,14 @@ impl ResolvedDisplay {
     }
 }
 
-/// Resolves the effective display mode from BBRadmin's override + bbport launcher's `settings.json`.
-pub fn resolve(
-    override_mode: DisplayMode,
-    launcher: &LauncherSettings,
-    output_res: (i32, i32),
-) -> ResolvedDisplay {
-    let (bb_fullscreen, exclusive, borderless) = match override_mode {
-        DisplayMode::FollowLauncher => {
-            if launcher.fullscreen {
-                (true, launcher.exclusive_fullscreen, false)
-            } else if launcher.borderless_fullscreen {
-                (false, false, true)
-            } else {
-                (false, false, false)
-            }
-        }
-        DisplayMode::Borderless => (false, false, true),
-        DisplayMode::Fullscreen => (true, false, false),
-        DisplayMode::Exclusive => (true, true, false),
-        DisplayMode::Windowed => (false, false, false),
+/// Resolves the effective display mode directly from bbport launcher's `settings.json`.
+pub fn resolve(launcher: &LauncherSettings, output_res: (i32, i32)) -> ResolvedDisplay {
+    let (bb_fullscreen, exclusive, borderless) = if launcher.fullscreen {
+        (true, launcher.exclusive_fullscreen, false)
+    } else if launcher.borderless_fullscreen {
+        (false, false, true)
+    } else {
+        (false, false, false)
     };
 
     let window_size = window_target(launcher, output_res);
@@ -161,21 +100,6 @@ pub fn resolve(
         borderless,
         device: launcher.game_monitor.clone(),
         window_size,
-    }
-}
-
-pub fn describe_launcher_mode(launcher: &LauncherSettings) -> &'static str {
-    if !launcher.exists {
-        return "settings.json do bbport não encontrado (padrão: Janela)";
-    }
-    if launcher.fullscreen && launcher.exclusive_fullscreen {
-        "Tela cheia exclusiva"
-    } else if launcher.fullscreen {
-        "Tela cheia (SDL)"
-    } else if launcher.borderless_fullscreen {
-        "Tela cheia sem bordas (borderless)"
-    } else {
-        "Janela"
     }
 }
 
@@ -594,37 +518,35 @@ mod tests {
         let mut launcher = LauncherSettings::default();
         launcher.exists = true;
 
-        // User's exact config: fullscreen=false, borderless_fullscreen=true
+        // fullscreen=false, borderless_fullscreen=true
         launcher.fullscreen = false;
         launcher.borderless_fullscreen = true;
-        let r = resolve(DisplayMode::FollowLauncher, &launcher, (1920, 1080));
+        let r = resolve(&launcher, (1920, 1080));
         assert!(!r.bb_fullscreen);
         assert!(!r.exclusive);
         assert!(r.borderless);
 
-        // Fullscreen=true, exclusive=false
+        // fullscreen=true, exclusive=false
         launcher.fullscreen = true;
         launcher.exclusive_fullscreen = false;
-        let r = resolve(DisplayMode::FollowLauncher, &launcher, (1920, 1080));
+        let r = resolve(&launcher, (1920, 1080));
         assert!(r.bb_fullscreen);
         assert!(!r.exclusive);
         assert!(!r.borderless);
 
-        // Fullscreen=true, exclusive=true
+        // fullscreen=true, exclusive=true
         launcher.exclusive_fullscreen = true;
-        let r = resolve(DisplayMode::FollowLauncher, &launcher, (1920, 1080));
+        let r = resolve(&launcher, (1920, 1080));
         assert!(r.bb_fullscreen);
         assert!(r.exclusive);
         assert!(!r.borderless);
 
-        // Explicit overrides
-        let r = resolve(DisplayMode::Windowed, &launcher, (1920, 1080));
+        // windowed
+        launcher.fullscreen = false;
+        launcher.borderless_fullscreen = false;
+        let r = resolve(&launcher, (1920, 1080));
         assert!(!r.bb_fullscreen);
         assert!(!r.borderless);
-
-        let r = resolve(DisplayMode::Borderless, &launcher, (1920, 1080));
-        assert!(!r.bb_fullscreen);
-        assert!(r.borderless);
     }
 
     #[test]

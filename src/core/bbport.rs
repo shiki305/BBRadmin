@@ -44,12 +44,22 @@ impl BbportInfo {
         !self.root.is_empty() && self.missing.is_empty()
     }
 
-    pub fn describe(&self) -> String {
+    pub fn describe_for(&self, lang: crate::core::i18n::Lang) -> String {
+        use crate::core::i18n::t;
         if self.root.is_empty() {
-            return "pasta do bbport ainda não escolhida".to_string();
+            return t(
+                lang,
+                "pasta do bbport ainda não escolhida",
+                "bbport folder not selected yet",
+            )
+            .to_string();
         }
         if !self.ready() {
-            return format!("faltando: {}", self.missing.join(", "));
+            return format!(
+                "{}: {}",
+                t(lang, "faltando", "missing"),
+                self.missing.join(", ")
+            );
         }
         let ver = if self.version.is_empty() {
             "bbport".to_string()

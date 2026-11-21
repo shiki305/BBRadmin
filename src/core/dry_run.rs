@@ -126,7 +126,6 @@ pub fn run(config: &AppConfig, print_to_console: bool) -> i32 {
         &config.account,
         &config.password,
         &config.rules,
-        config.display_mode,
     );
     report.push_str(&plan.report(false));
 

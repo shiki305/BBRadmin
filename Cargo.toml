@@ -1,6 +1,6 @@
 [package]
 name = "bbradmin"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 license = "GPL-2.0-only"
 description = "Co-op seamless do Bloodborne (bbport) em Radmin VPN — reescrito em Rust"
@@ -24,6 +24,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 version = "0.59"
 features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",

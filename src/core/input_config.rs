@@ -38,17 +38,38 @@ pub fn current(port: &BbportInfo) -> String {
 }
 
 pub fn describe(port: &BbportInfo) -> String {
+    describe_for(port, crate::core::i18n::Lang::PtBr)
+}
+
+pub fn describe_for(port: &BbportInfo, lang: crate::core::i18n::Lang) -> String {
+    use crate::core::i18n::t;
     let mode = current(port);
     if mode.is_empty() {
         return format!(
-            "sem {} (o jogo usa os controles padrão dele)",
-            coop_schema::INPUT_FILE
+            "{} {} {}",
+            t(lang, "sem", "no"),
+            coop_schema::INPUT_FILE,
+            t(
+                lang,
+                "(o jogo usa os controles padrão dele)",
+                "(the game uses its default controls)"
+            )
         );
     }
     if mode == KEYBOARD {
-        return "teclado e mouse (o mouse gira a câmera; F7 liga/desliga no jogo)".to_string();
+        return t(
+            lang,
+            "teclado e mouse (o mouse gira a câmera; F7 liga/desliga no jogo)",
+            "keyboard and mouse (mouse turns the camera; F7 toggles in-game)",
+        )
+        .to_string();
     }
-    "controle (o mouse não mexe a câmera; as teclas continuam funcionando)".to_string()
+    t(
+        lang,
+        "controle (o mouse não mexe a câmera; as teclas continuam funcionando)",
+        "controller (mouse does not turn the camera; keyboard keys still work)",
+    )
+    .to_string()
 }
 
 pub fn apply(port: &BbportInfo, mode: &str) -> Result<String, String> {

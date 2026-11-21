@@ -10,9 +10,9 @@ use rand::Rng;
 
 use crate::core::bbport_launcher;
 use crate::core::coop_schema;
-use crate::core::display::DisplayMode;
 use crate::core::dpapi;
 use crate::core::host_rules::HostRules;
+use crate::core::i18n::{t, Lang, LangMode};
 use crate::core::input_config;
 use crate::core::log;
 
@@ -27,8 +27,6 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    pub const ALL: &[ThemeMode] = &[ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
-
     pub fn from_config(val: &str) -> Self {
         match val.trim().to_ascii_lowercase().as_str() {
             "dark" => Self::Dark,
@@ -45,19 +43,11 @@ impl ThemeMode {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn short_label_for(self, lang: Lang) -> &'static str {
         match self {
-            Self::System => "Seguir o tema do Windows (padrão)",
-            Self::Dark => "Escuro",
-            Self::Light => "Claro",
-        }
-    }
-
-    pub fn short_label(self) -> &'static str {
-        match self {
-            Self::System => "Tema: Sistema",
-            Self::Dark => "Tema: Escuro",
-            Self::Light => "Tema: Claro",
+            Self::System => t(lang, "Tema: Sistema", "Theme: System"),
+            Self::Dark => t(lang, "Tema: Escuro", "Theme: Dark"),
+            Self::Light => t(lang, "Tema: Claro", "Theme: Light"),
         }
     }
 
@@ -79,11 +69,10 @@ pub struct AppConfig {
     pub remote_ip: String,
     pub rules: HostRules,
     pub play_with: String,
-    pub display_mode: DisplayMode,
     pub theme: ThemeMode,
+    pub lang: LangMode,
     pub auto_update: bool,
-    pub keep_server: bool,
-    pub stop_server_with_game: bool,
+    pub auto_stop_server: bool,
 }
 
 impl Default for AppConfig {
@@ -96,11 +85,10 @@ impl Default for AppConfig {
             remote_ip: String::new(),
             rules: HostRules::default(),
             play_with: String::new(),
-            display_mode: DisplayMode::FollowLauncher,
             theme: ThemeMode::System,
+            lang: LangMode::Auto,
             auto_update: true,
-            keep_server: false,
-            stop_server_with_game: true,
+            auto_stop_server: true,
         }
     }
 }
@@ -167,11 +155,21 @@ impl AppConfig {
                                 String::new()
                             };
                     }
-                    "display_mode" => config.display_mode = DisplayMode::from_config(value),
                     "theme" => config.theme = ThemeMode::from_config(value),
+                    "ui_lang" => config.lang = LangMode::from_config(value),
                     "auto_update" => config.auto_update = value != "0",
-                    "keep_server" => config.keep_server = value == "1",
-                    "stop_server_with_game" => config.stop_server_with_game = value != "0",
+                    "auto_stop_server" => config.auto_stop_server = value != "0",
+                    // Backwards compatibility with older config.ini files:
+                    "keep_server" => {
+                        if value == "1" {
+                            config.auto_stop_server = false;
+                        }
+                    }
+                    "stop_server_with_game" => {
+                        if value == "0" {
+                            config.auto_stop_server = false;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -242,13 +240,17 @@ impl AppConfig {
             format!("rule_custom_damage={}", self.rules.custom_damage),
             format!("rule_custom_poise={}", self.rules.custom_poise),
             format!("play_with={}", self.play_with),
-            format!("display_mode={}", self.display_mode.as_config()),
             format!("theme={}", self.theme.as_config()),
+            format!("ui_lang={}", self.lang.as_config()),
             format!("auto_update={}", if self.auto_update { "1" } else { "0" }),
-            format!("keep_server={}", if self.keep_server { "1" } else { "0" }),
+            format!(
+                "auto_stop_server={}",
+                if self.auto_stop_server { "1" } else { "0" }
+            ),
+            format!("keep_server={}", if self.auto_stop_server { "0" } else { "1" }),
             format!(
                 "stop_server_with_game={}",
-                if self.stop_server_with_game { "1" } else { "0" }
+                if self.auto_stop_server { "1" } else { "0" }
             ),
         ];
         let body = lines.join("\r\n") + "\r\n";

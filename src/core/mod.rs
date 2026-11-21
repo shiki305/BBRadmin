@@ -9,6 +9,7 @@ pub mod firewall;
 pub mod game_environment;
 pub mod health;
 pub mod host_rules;
+pub mod i18n;
 pub mod input_config;
 pub mod log;
 pub mod overrides;

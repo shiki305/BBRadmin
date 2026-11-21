@@ -62,16 +62,21 @@ pub fn reachable(host_ip: &str, timeout_ms: u64) -> bool {
 }
 
 pub fn describe(host_ip: &str, timeout_ms: u64) -> String {
+    describe_for(host_ip, timeout_ms, crate::core::i18n::Lang::PtBr)
+}
+
+pub fn describe_for(host_ip: &str, timeout_ms: u64, lang: crate::core::i18n::Lang) -> String {
+    use crate::core::i18n::t;
     let status = http_status(host_ip, coop_schema::WEBAPI_PORT, "/status", timeout_ms);
     let webapi = if !status.is_empty() {
-        format!("responde ({status})")
+        format!("{} ({status})", t(lang, "responde", "online"))
     } else {
-        "sem resposta".to_string()
+        t(lang, "sem resposta", "no response").to_string()
     };
     let backend = if tcp(host_ip, coop_schema::BACKEND_PORT, timeout_ms) {
-        "responde"
+        t(lang, "responde", "online")
     } else {
-        "sem resposta"
+        t(lang, "sem resposta", "no response")
     };
     format!(
         "WebAPI {}: {} · backend {}: {} · link UDP {}",
