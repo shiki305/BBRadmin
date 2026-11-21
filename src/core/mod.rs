@@ -15,3 +15,4 @@ pub mod overrides;
 pub mod radmin;
 pub mod server_assets;
 pub mod server_controller;
+pub mod updater;

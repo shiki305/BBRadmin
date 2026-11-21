@@ -11,8 +11,11 @@ use crate::core::app_config::{self, AppConfig};
 use crate::core::dry_run;
 use crate::core::firewall;
 use crate::core::log;
+use crate::core::updater;
 
 fn main() -> ExitCode {
+    updater::cleanup_old_binary();
+
     let mut is_dry_run = false;
     let mut is_install_firewall = false;
 

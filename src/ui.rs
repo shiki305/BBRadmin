@@ -37,6 +37,7 @@ use crate::core::log;
 use crate::core::overrides;
 use crate::core::radmin::{self, NetworkChoice};
 use crate::core::server_controller::ServerController;
+use crate::core::updater;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -72,6 +73,12 @@ enum WorkerMsg {
         display: ResolvedDisplay,
     },
     RefreshInputHint,
+    UpdateStatus(Option<String>),
+    UpdateLog(String),
+    UpdateReadyToRestart {
+        exe: std::path::PathBuf,
+        version: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +222,8 @@ struct BbradminApp {
     launcher_account_hint: String,
     launcher_display_hint: String,
     input_hint: String,
+    update_status: Option<String>,
+    restarting_for_update: bool,
 }
 
 impl BbradminApp {
@@ -274,10 +283,104 @@ impl BbradminApp {
             launcher_account_hint: String::new(),
             launcher_display_hint: String::new(),
             input_hint: String::new(),
+            update_status: None,
+            restarting_for_update: false,
         };
         app.refresh_detection();
-        log::line("BBRadmin (Rust) aberto.");
+        log::line(&format!("BBRadmin v{} (Rust) aberto.", updater::CURRENT_VERSION));
+        if app.config.auto_update {
+            app.start_auto_update_check();
+        }
         app
+    }
+
+    fn start_auto_update_check(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            match updater::check_latest() {
+                Ok(Some(info)) => {
+                    let msg = format!("Nova versão v{} encontrada; atualizando...", info.version);
+                    log::line(&msg);
+                    let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
+                        "Atualizando para v{}...",
+                        info.version
+                    ))));
+                    let _ = tx.send(WorkerMsg::UpdateLog(msg));
+                    ctx.request_repaint();
+
+                    match updater::download_and_apply(&info) {
+                        Ok(exe) => {
+                            let _ = tx.send(WorkerMsg::UpdateReadyToRestart {
+                                exe,
+                                version: info.version,
+                            });
+                        }
+                        Err(err) => {
+                            log::line(&format!("Atualização automática falhou: {err}"));
+                            let _ = tx.send(WorkerMsg::UpdateStatus(None));
+                            let _ = tx.send(WorkerMsg::UpdateLog(format!(
+                                "Não foi possível atualizar automaticamente para v{}: {err} ({})",
+                                info.version, info.html_url
+                            )));
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    // Offline or rate-limited: log quietly without bothering the user.
+                    log::line(&format!("Verificação de atualização ignorada: {err}"));
+                }
+            }
+        });
+    }
+
+    fn on_check_updates_manual(&mut self) {
+        self.spawn_worker("Verificando atualizações no GitHub...", |tx| {
+            match updater::check_latest() {
+                Ok(None) => {
+                    let msg = format!(
+                        "Você já está na versão mais recente (v{}).",
+                        updater::CURRENT_VERSION
+                    );
+                    show_info(&msg);
+                    msg
+                }
+                Ok(Some(info)) => {
+                    let prompt = format!(
+                        "Nova versão v{} disponível (você está na v{}).\n\nDeseja baixar, atualizar e reiniciar o BBRadmin agora?",
+                        info.version,
+                        updater::CURRENT_VERSION
+                    );
+                    if !ask_yes_no(&prompt) {
+                        return format!("Atualização para v{} adiada pelo usuário.", info.version);
+                    }
+                    let _ = tx.send(WorkerMsg::UpdateStatus(Some(format!(
+                        "Baixando v{}...",
+                        info.version
+                    ))));
+                    match updater::download_and_apply(&info) {
+                        Ok(exe) => {
+                            let ver = info.version.clone();
+                            let _ = tx.send(WorkerMsg::UpdateReadyToRestart { exe, version: ver.clone() });
+                            format!("Atualização v{ver} instalada; reiniciando...")
+                        }
+                        Err(err) => {
+                            let _ = tx.send(WorkerMsg::UpdateStatus(None));
+                            let msg = format!("Falha ao atualizar para v{}: {err}", info.version);
+                            show_info(&msg);
+                            msg
+                        }
+                    }
+                }
+                Err(err) => {
+                    let msg = format!("Não foi possível verificar atualizações: {err}");
+                    show_info(&msg);
+                    msg
+                }
+            }
+        });
     }
 
     fn is_host(&self) -> bool {
@@ -369,6 +472,32 @@ impl BbradminApp {
                 }
                 WorkerMsg::RefreshInputHint => {
                     self.refresh_input_hint();
+                }
+                WorkerMsg::UpdateStatus(status) => {
+                    self.update_status = status;
+                }
+                WorkerMsg::UpdateLog(text) => {
+                    self.append_log(&text);
+                }
+                WorkerMsg::UpdateReadyToRestart { exe, version } => {
+                    self.update_status = None;
+                    if self.game.is_none() && !self.server.started_by_us() {
+                        match updater::relaunch(&exe) {
+                            Ok(()) => {
+                                self.restarting_for_update = true;
+                                self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(err) => {
+                                self.append_log(&format!(
+                                    "Atualização v{version} instalada, mas não consegui reabrir automaticamente ({err}). Feche e abra o BBRadmin."
+                                ));
+                            }
+                        }
+                    } else {
+                        self.append_log(&format!(
+                            "Atualização v{version} já instalada em disco — será usada na próxima vez que abrir o BBRadmin."
+                        ));
+                    }
                 }
             }
         }
@@ -559,12 +688,19 @@ impl eframe::App for BbradminApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new("BBRadmin")
-                                .size(19.0)
-                                .strong()
-                                .color(p.title_text),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("BBRadmin")
+                                    .size(19.0)
+                                    .strong()
+                                    .color(p.title_text),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("v{}", updater::CURRENT_VERSION))
+                                    .size(11.5)
+                                    .color(p.muted_text),
+                            );
+                        });
                         ui.label(
                             egui::RichText::new("co-op contínuo para Bloodborne, por Radmin VPN")
                                 .size(12.0)
@@ -634,6 +770,9 @@ impl eframe::App for BbradminApp {
                     if self.busy {
                         state = format!("Trabalhando...  ·  {state}");
                     }
+                    if let Some(upd) = &self.update_status {
+                        state = format!("{upd}  ·  {state}");
+                    }
                     ui.label(egui::RichText::new(state).size(12.0));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -690,7 +829,11 @@ impl eframe::App for BbradminApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.poller_stop.store(true, Ordering::Relaxed);
         self.placer = None;
-        if self.is_host() && self.server.started_by_us() && !self.config.keep_server {
+        if !self.restarting_for_update
+            && self.is_host()
+            && self.server.started_by_us()
+            && !self.config.keep_server
+        {
             log::line("Fechando o BBRadmin: parando o servidor que eu iniciei.");
             self.server.stop();
         }
@@ -1262,6 +1405,15 @@ impl BbradminApp {
             ui.add_space(2.0);
             if ui
                 .checkbox(
+                    &mut self.config.auto_update,
+                    "Atualizar automaticamente ao abrir (via GitHub Releases)",
+                )
+                .changed()
+            {
+                self.config.save();
+            }
+            if ui
+                .checkbox(
                     &mut self.config.keep_server,
                     "Deixar o servidor rodando quando eu fechar o BBRadmin",
                 )
@@ -1340,6 +1492,12 @@ impl BbradminApp {
                     .args(["/c", "start", "", &path.to_string_lossy()])
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn();
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Verificar atualizações"))
+                .clicked()
+            {
+                self.on_check_updates_manual();
             }
         });
     }

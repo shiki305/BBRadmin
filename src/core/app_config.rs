@@ -81,6 +81,7 @@ pub struct AppConfig {
     pub play_with: String,
     pub display_mode: DisplayMode,
     pub theme: ThemeMode,
+    pub auto_update: bool,
     pub keep_server: bool,
     pub stop_server_with_game: bool,
 }
@@ -97,6 +98,7 @@ impl Default for AppConfig {
             play_with: String::new(),
             display_mode: DisplayMode::FollowLauncher,
             theme: ThemeMode::System,
+            auto_update: true,
             keep_server: false,
             stop_server_with_game: true,
         }
@@ -167,6 +169,7 @@ impl AppConfig {
                     }
                     "display_mode" => config.display_mode = DisplayMode::from_config(value),
                     "theme" => config.theme = ThemeMode::from_config(value),
+                    "auto_update" => config.auto_update = value != "0",
                     "keep_server" => config.keep_server = value == "1",
                     "stop_server_with_game" => config.stop_server_with_game = value != "0",
                     _ => {}
@@ -241,6 +244,7 @@ impl AppConfig {
             format!("play_with={}", self.play_with),
             format!("display_mode={}", self.display_mode.as_config()),
             format!("theme={}", self.theme.as_config()),
+            format!("auto_update={}", if self.auto_update { "1" } else { "0" }),
             format!("keep_server={}", if self.keep_server { "1" } else { "0" }),
             format!(
                 "stop_server_with_game={}",

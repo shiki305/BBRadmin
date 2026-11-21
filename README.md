@@ -41,6 +41,11 @@ Nesta versão em **Rust**:
 - Na aba **Avançado → Modo de tela**, é possível seguir automaticamente o launcher do bbport
   (padrão) ou sobrescrever diretamente pelo BBRadmin (*Tela cheia sem bordas*, *Tela cheia SDL*,
   *Tela cheia exclusiva* ou *Janela*).
+- **Tema escuro / claro automático:** segue o tema do Windows por padrão (com alternância rápida
+  entre **Sistema / Escuro / Claro** na barra inferior ou em **Avançado → Opções**).
+- **Atualização automática ao abrir:** verifica em segundo plano a release mais recente no GitHub
+  (`anreren/BBRadmin`), baixa e valida o novo `BBRadmin.exe` e reinicia automaticamente quando
+  possível (também disponível manualmente em **Avançado → Verificar atualizações**).
 
 ---
 

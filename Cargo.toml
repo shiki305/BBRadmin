@@ -1,6 +1,6 @@
 [package]
 name = "bbradmin"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 license = "GPL-2.0-only"
 description = "Co-op seamless do Bloodborne (bbport) em Radmin VPN — reescrito em Rust"
@@ -17,6 +17,7 @@ rand = "0.8"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows-sys]
